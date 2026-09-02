@@ -312,6 +312,21 @@ ${writeRule}
     openWorldHint: true,
   } as const;
 
+  /**
+   * Upper-cased names of the programs the catalog allows. Read per call, not
+   * once: the operator edits programs.json while the server runs, and a stale
+   * copy would tell the model a program is not runnable after it was added.
+   * A broken or missing catalog means "nothing is runnable", not an error here.
+   */
+  const runnableNames = (): Set<string> => {
+    try {
+      if (ctx.programs.configError) return new Set();
+      return new Set(ctx.programs.readCatalog().map((p) => p.name.trim().toUpperCase()));
+    } catch {
+      return new Set();
+    }
+  };
+
   server.registerTool(
     "search_screens",
     {
@@ -350,10 +365,17 @@ When the reply carries a 'glossary' block, PREFER IT over 'screens'. Those are
 curated business-term mappings maintained by the operator, and they exist because
 title similarity gets these wrong: searching 'זיכוי' ranks 'נקודות זיכוי' (tax
 credit points) above 'חשבוניות זיכוי' (credit notes). Each entry's 'notes' records
-traps the titles do not show -- read them before using the screens.`,
+traps the titles do not show -- read them before using the screens.
+
+PROCEDURES AND REPORTS are searchable too, by the same Hebrew titles: pass
+kinds: ['P','R'] (or ['F','P','R'] for everything). They are not screens and
+cannot be queried; each result carries 'kind' and 'runnable'. Read what one does
+with help{name, type} before anything else. 'runnable: false' means the operator's
+catalog does not list it -- report that, do not try a different name. The same
+name can be a screen, a report AND a procedure (FORMMSG is all three).`,
       inputSchema: searchScreensShape,
     },
-    handler("search_screens", (args) => searchScreens(ctx.dict, args, glossary, examples)),
+    handler("search_screens", (args) => searchScreens(ctx.dict, args, glossary, examples, runnableNames())),
   );
   registered.push("search_screens");
 
@@ -696,7 +718,7 @@ entry rather than by changing anything in Priority.`,
     },
     handler("readiness_report", async () => {
       await ctx.dict.ready();
-      return buildReadiness(ctx.dict, glossary);
+      return buildReadiness(ctx.dict, glossary, runnableNames());
     }),
   );
   registered.push("readiness_report");

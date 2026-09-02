@@ -30,6 +30,10 @@ export interface ReadinessReport {
     unavailable: number;
     withHebrewTitle: number;
     glossaryTerms: number;
+    /** Procedures and reports known from EXEC. */
+    programs: number;
+    /** Of those, how many the operator's catalog allows this server to run. */
+    runnablePrograms: number;
   };
   issues: ReadinessIssue[];
   notes: string[];
@@ -37,8 +41,18 @@ export interface ReadinessReport {
 
 const MAX_EXAMPLES = 8;
 
-export function buildReadiness(dict: PriorityDictionary, glossary?: Glossary): ReadinessReport {
-  const all = dict.allEntries();
+export function buildReadiness(
+  dict: PriorityDictionary,
+  glossary?: Glossary,
+  /** Upper-cased names from programs.json. */
+  runnable: Set<string> = new Set(),
+): ReadinessReport {
+  // Screens and programs are different populations with different questions.
+  // Every screen metric below is over screens alone, or the counts would shift
+  // by nine thousand the day programs were added to the index.
+  const everything = dict.allEntries();
+  const all = everything.filter((e) => e.kind === "F");
+  const programs = everything.filter((e) => e.kind !== "F");
 
   const direct = all.filter((e) => e.access === "direct");
   const viaParent = all.filter((e) => e.access === "via-parent");
@@ -149,6 +163,26 @@ export function buildReadiness(dict: PriorityDictionary, glossary?: Glossary): R
     });
   }
 
+  // 6. Programs the model can find but this server cannot run. Not a defect --
+  //    the catalog is deliberately small -- but a model that finds the right
+  //    report and then cannot run it should be able to say why.
+  const runnableHere = programs.filter((p) => runnable.has(p.screen.toUpperCase()));
+  if (programs.length) {
+    const uncatalogued = programs.length - runnableHere.length;
+    issues.push({
+      kind: "uncatalogued-programs",
+      severity: "low",
+      count: uncatalogued,
+      detail:
+        `${programs.length} procedures and reports are searchable by title; ${runnableHere.length} ` +
+        `are in programs.json and can be run. The rest can be described (help) but not executed.`,
+      fix:
+        "This is by design: Priority cannot enumerate runnable programs, so the operator " +
+        "lists them. Add a program to programs.json when a user needs it run.",
+      examples: runnableHere.slice(0, MAX_EXAMPLES).map((p) => `${p.screen} (${p.kind}) — runnable`),
+    });
+  }
+
   const notes: string[] = [
     "Computed from the cached dictionary; no requests were made.",
     "Ambiguous titles are the finding worth acting on first — they produce " +
@@ -170,6 +204,8 @@ export function buildReadiness(dict: PriorityDictionary, glossary?: Glossary): R
       unavailable: unavailable.length,
       withHebrewTitle: titled.length,
       glossaryTerms: terms.length,
+      programs: programs.length,
+      runnablePrograms: runnableHere.length,
     },
     issues: issues.sort((a, b) => rank(b.severity) - rank(a.severity)),
     notes,

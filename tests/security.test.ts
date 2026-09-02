@@ -18,7 +18,7 @@ const KNOWN = new Set(["CUSTOMERS", "AINVOICES", "PART"]);
 const dict = {
   get: (screen: string): ScreenEntry | undefined =>
     KNOWN.has(screen)
-      ? { screen, title: screen, table: "T", module: "M", published: true, access: "direct" }
+      ? { screen, title: screen, table: "T", module: "M", published: true, access: "direct" as const, kind: "F" as const }
       : undefined,
 } as unknown as PriorityDictionary;
 

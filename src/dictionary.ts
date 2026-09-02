@@ -57,13 +57,25 @@ export interface ScreenEntry {
    * - `via-parent`  not listed as an entity set, but a sub-form of a readable
    *                 screen: read it through {@link ScreenEntry.parents}
    * - `unavailable` neither published nor a child of anything readable
+   * - `program`     not a screen at all: a procedure or report. It is never
+   *                 queried; it is described with `help` and run through the
+   *                 program tools, and only if the operator's catalog lists it.
    */
-  access: "direct" | "via-parent" | "unavailable";
+  access: "direct" | "via-parent" | "unavailable" | "program";
   /**
    * Readable screens that own this one as a sub-form, from EFORM's own
    * parent/child graph. Present only when `access` is `via-parent`.
    */
   parents?: string[];
+  /**
+   * What kind of entity this is: `F` screen, `P` procedure, `R` report.
+   *
+   * Screens come from EFORM; procedures and reports from EXEC, which lists every
+   * entity in the installation with its Hebrew title. One name can exist as
+   * several kinds -- FORMMSG is a screen, a report AND a procedure -- so the
+   * kind is part of the identity, not a label on it.
+   */
+  kind: "F" | "P" | "R";
 }
 
 export interface SearchResult {
@@ -79,6 +91,8 @@ export interface DictionaryStats {
   entitySets: number;
   /** Entity sets with no EFORM row — published but undocumented. */
   entitySetsWithoutForm: number;
+  /** Procedures and reports known from EXEC. */
+  programs: number;
 }
 
 /**
@@ -152,14 +166,26 @@ interface IndexedEntry extends ScreenEntry {
 
 export class PriorityDictionary {
   private entries: IndexedEntry[] = [];
+  /** Screens only. A program sharing a screen's name must not shadow it here. */
   private byScreen = new Map<string, IndexedEntry>();
+  /** Programs by name; several kinds can share one name. */
+  private byProgram = new Map<string, IndexedEntry[]>();
   private entitySetCount = 0;
   private withoutForm = 0;
+  private programCount = 0;
   private loading: Promise<void> | undefined;
   /** child screen -> every screen that owns it as a sub-form, readable or not. */
   private childToParents = new Map<string, string[]>();
 
-  constructor(private readonly client: PriorityODataClient) {}
+  /**
+   * @param opts.cache Read and write the on-disk cache. Off in tests, which
+   *   would otherwise load whatever installation the developer's .env points at
+   *   instead of the rows the test supplied.
+   */
+  constructor(
+    private readonly client: PriorityODataClient,
+    private readonly opts: { cache?: boolean } = {},
+  ) {}
 
   /** Load once per process; concurrent callers share the same in-flight load. */
   async ready(): Promise<void> {
@@ -170,31 +196,58 @@ export class PriorityDictionary {
   private async load(): Promise<void> {
     const cached = readCache(installationBase());
     if (cached) {
-      this.ingest(cached.sets, cached.forms);
+      this.ingest(cached.sets, cached.forms, cached.programs);
       process.stderr.write(
         `[priority-mcp] dictionary from cache (${cached.forms.length} forms, ` +
-          `age ${Math.round(cached.ageMs / 3600_000)}h)\n`,
+          `${cached.programs.length} programs, age ${Math.round(cached.ageMs / 3600_000)}h)\n`,
       );
       return;
     }
 
     const started = Date.now();
-    // Three things are needed, and none substitutes for another: EFORM says what
+    // Four things are needed, and none substitutes for another: EFORM says what
     // a screen MEANS, the service document says whether it can be QUERIED
-    // DIRECTLY, and FLINK_SUBFORM says which screens are children of which -- the
-    // only way to tell a closed screen from one that is merely a sub-form.
+    // DIRECTLY, FLINK_SUBFORM says which screens are children of which -- the
+    // only way to tell a closed screen from one that is merely a sub-form -- and
+    // EXEC names every procedure and report, which EFORM does not cover at all.
     //
-    // Note the missing parent $select. It is not an oversight: combining a parent
-    // $select with $expand makes this server abort the response mid-JSON, so the
-    // full EFORM row comes back and is trimmed below instead. The nested $select
-    // inside the expand is safe and does keep the link rows small.
-    const [sets, raw] = await Promise.all([
+    // Note the missing parent $select on EFORM. It is not an oversight: combining
+    // a parent $select with $expand makes this server abort the response
+    // mid-JSON, so the full EFORM row comes back and is trimmed below instead.
+    // The nested $select inside the expand is safe and does keep the link rows
+    // small. EXEC has no expand, so its $select is fine.
+    //
+    // EXEC is filtered to P and R with chained `or`, not `in`: this server refuses
+    // `in` (HTTP 403). Measured: 9,229 rows, every one titled, in ~6 seconds.
+    const [sets, raw, exec] = await Promise.all([
       this.client.entitySets(),
       this.client.query("EFORM", {
         expand: "FLINK_SUBFORM($select=FNAME)",
         pageSize: 500,
       }),
+      this.client
+        .query("EXEC", {
+          select: ["ENAME", "TYPE", "TITLE", "MODULENAME"],
+          filter: "TYPE eq 'P' or TYPE eq 'R'",
+          pageSize: 500,
+        })
+        .catch((err: unknown) => {
+          // Programs are an addition to the dictionary, not its basis. An
+          // installation that closes EXEC still gets every screen.
+          process.stderr.write(
+            `[priority-mcp] EXEC not readable, programs will not be searchable: ` +
+              `${err instanceof Error ? (err.message.split("\n")[0] ?? "") : String(err)}\n`,
+          );
+          return [] as Record<string, unknown>[];
+        }),
     ]);
+
+    const programs = exec.map((r) => ({
+      ENAME: r["ENAME"],
+      TYPE: r["TYPE"],
+      TITLE: r["TITLE"],
+      MODULENAME: r["MODULENAME"],
+    }));
 
     // Trim before caching: the un-selectable parent row carries every EFORM
     // column, which is a large amount of mostly-unused JSON on disk otherwise.
@@ -210,14 +263,14 @@ export class PriorityDictionary {
 
     process.stderr.write(
       `[priority-mcp] dictionary fetched in ${((Date.now() - started) / 1000).toFixed(1)}s ` +
-        `(${forms.length} forms)\n`,
+        `(${forms.length} forms, ${programs.length} programs)\n`,
     );
 
-    this.ingest(sets, forms);
-    writeCache(installationBase(), sets, forms);
+    this.ingest(sets, forms, programs);
+    if (this.opts.cache !== false) writeCache(installationBase(), sets, forms, programs);
   }
 
-  private ingest(sets: string[], forms: Record<string, unknown>[]): void {
+  private ingest(sets: string[], forms: Record<string, unknown>[], programs: Record<string, unknown>[]): void {
     const published = new Set(sets);
     this.entitySetCount = sets.length;
 
@@ -261,6 +314,7 @@ export class PriorityDictionary {
         published: isPublished,
         access: isPublished ? "direct" : readableParents.length ? "via-parent" : "unavailable",
         ...(!isPublished && readableParents.length ? { parents: readableParents } : {}),
+        kind: "F",
         haystack: normalize([screen, title, table, module].filter(Boolean).join(" ")),
         normScreen: normalize(screen),
         normTitle: normalize(title ?? ""),
@@ -283,6 +337,7 @@ export class PriorityDictionary {
         module: null,
         published: true,
         access: "direct",
+        kind: "F",
         haystack: normalize(name),
         normScreen: normalize(name),
         normTitle: "",
@@ -292,20 +347,63 @@ export class PriorityDictionary {
       this.entries.push(entry);
       this.byScreen.set(name, entry);
     }
+
+    // Procedures and reports. They share the index and the scoring so a search
+    // for "טריגרים" can surface FORMTRIGREP, but they are kept OUT of byScreen:
+    // FORMMSG the report must not answer a get() for FORMMSG the screen.
+    for (const row of programs) {
+      const name = str(row["ENAME"]);
+      const type = str(row["TYPE"]);
+      if (!name || (type !== "P" && type !== "R")) continue;
+      const title = str(row["TITLE"]);
+      const module = str(row["MODULENAME"]);
+      const entry: IndexedEntry = {
+        screen: name,
+        title,
+        table: null,
+        module,
+        published: false,
+        access: "program",
+        kind: type,
+        haystack: normalize([name, title, module].filter(Boolean).join(" ")),
+        normScreen: normalize(name),
+        normTitle: normalize(title ?? ""),
+        stemHaystack: stemHebrew(normalize([name, title, module].filter(Boolean).join(" "))),
+        stemTitle: stemHebrew(normalize(title ?? "")),
+      };
+      this.entries.push(entry);
+      const list = this.byProgram.get(name) ?? [];
+      list.push(entry);
+      this.byProgram.set(name, list);
+      this.programCount++;
+    }
   }
 
   stats(): DictionaryStats {
+    const screens = this.entries.filter((e) => e.kind === "F");
     return {
-      forms: this.entries.length - this.withoutForm,
-      published: this.entries.filter((e) => e.published).length,
+      forms: screens.length - this.withoutForm,
+      published: screens.filter((e) => e.published).length,
       entitySets: this.entitySetCount,
       entitySetsWithoutForm: this.withoutForm,
+      programs: this.programCount,
     };
   }
 
-  /** Exact, case-sensitive lookup. */
+  /** Exact, case-sensitive lookup of a SCREEN. Programs are found with getProgram. */
   get(screen: string): ScreenEntry | undefined {
     return this.byScreen.get(screen);
+  }
+
+  /**
+   * Procedures and reports by exact name. Program names are case-insensitive in
+   * Priority (unlike screen names), so the lookup folds case. Several may come
+   * back: pass `type` to pick one kind.
+   */
+  getProgram(name: string, type?: "P" | "R"): ScreenEntry[] {
+    const wanted = name.trim().toUpperCase();
+    const hits = this.byProgram.get(wanted) ?? [];
+    return strip(type ? hits.filter((h) => h.kind === type) : hits);
   }
 
   /** Every entry, for whole-dictionary analysis rather than search. */
@@ -347,18 +445,26 @@ export class PriorityDictionary {
    * screens, and the caller sees only the first `limit` of them. An exact name or
    * title match must therefore outrank an incidental mention in a module name.
    */
-  search(query: string, opts: { limit?: number; onlyReadable?: boolean } = {}): SearchResult {
+  search(
+    query: string,
+    opts: { limit?: number; onlyReadable?: boolean; kinds?: ("F" | "P" | "R")[] } = {},
+  ): SearchResult {
     const limit = Math.min(Math.max(opts.limit ?? 25, 1), 200);
     const onlyReadable = opts.onlyReadable !== false;
+    // Screens only by default. Programs were added to the index later, and a
+    // caller who learned the tool as a screen search must keep getting exactly
+    // the results it got before -- 9,229 programs would otherwise dilute every
+    // query that did not ask for them.
+    const kinds = new Set<string>(opts.kinds?.length ? opts.kinds : ["F"]);
     const q = normalize(query);
 
     // The default filter is "readable", not "published". Those differ by
     // thousands of screens: every sub-form is absent from the service document,
     // so filtering on `published` hid child screens completely and a caller
     // searching for one was told it did not exist.
-    const pool = onlyReadable
-      ? this.entries.filter((e) => e.access !== "unavailable")
-      : this.entries;
+    const pool = this.entries.filter(
+      (e) => kinds.has(e.kind) && (!onlyReadable || e.access !== "unavailable"),
+    );
 
     if (!q) {
       return {
@@ -417,7 +523,7 @@ export class PriorityDictionary {
 
 /** Drop the internal index fields before handing entries to a caller. */
 function strip(entries: IndexedEntry[]): ScreenEntry[] {
-  return entries.map(({ screen, title, table, module, published, access, parents }) => ({
+  return entries.map(({ screen, title, table, module, published, access, parents, kind }) => ({
     screen,
     title,
     table,
@@ -425,6 +531,7 @@ function strip(entries: IndexedEntry[]): ScreenEntry[] {
     published,
     access,
     ...(parents ? { parents } : {}),
+    kind,
   }));
 }
 
@@ -468,44 +575,52 @@ function cacheFileFor(installationUrl: string): string {
 interface CacheFile {
   // Bumped to 2 when the parent/child graph was added: a v1 cache has no link
   // rows, so every child screen would silently look `unavailable` until the TTL
-  // expired.
-  version: 2;
+  // expired. Bumped to 3 when procedures and reports were added from EXEC: a v2
+  // cache has no programs, so a search for them would find nothing for a day.
+  version: 3;
   fetchedAt: number;
   /** Which installation this was fetched from -- another one's cache is wrong. */
   source: string;
   sets: string[];
   forms: Record<string, unknown>[];
+  programs: Record<string, unknown>[];
 }
 
 function readCache(
   sourceUrl: string,
-): { sets: string[]; forms: Record<string, unknown>[]; ageMs: number } | null {
+): { sets: string[]; forms: Record<string, unknown>[]; programs: Record<string, unknown>[]; ageMs: number } | null {
   try {
     const file = cacheFileFor(sourceUrl);
     if (!fs.existsSync(file)) return null;
     const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as CacheFile;
-    if (parsed.version !== 2) return null;
+    if (parsed.version !== 3) return null;
     // Keyed to the connection: pointing .env at another installation must not
     // serve that installation's screen names.
     if (parsed.source !== sourceUrl) return null;
     const ageMs = Date.now() - parsed.fetchedAt;
     if (ageMs > CACHE_TTL_MS || ageMs < 0) return null;
-    if (!Array.isArray(parsed.sets) || !Array.isArray(parsed.forms)) return null;
-    return { sets: parsed.sets, forms: parsed.forms, ageMs };
+    if (!Array.isArray(parsed.sets) || !Array.isArray(parsed.forms) || !Array.isArray(parsed.programs)) return null;
+    return { sets: parsed.sets, forms: parsed.forms, programs: parsed.programs, ageMs };
   } catch {
     // A corrupt cache must never break startup -- refetching is always correct.
     return null;
   }
 }
 
-function writeCache(sourceUrl: string, sets: string[], forms: Record<string, unknown>[]): void {
+function writeCache(
+  sourceUrl: string,
+  sets: string[],
+  forms: Record<string, unknown>[],
+  programs: Record<string, unknown>[],
+): void {
   try {
     const payload: CacheFile = {
-      version: 2,
+      version: 3,
       fetchedAt: Date.now(),
       source: sourceUrl,
       sets,
       forms,
+      programs,
     };
     fs.writeFileSync(cacheFileFor(sourceUrl), JSON.stringify(payload), "utf8");
   } catch {

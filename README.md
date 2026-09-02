@@ -69,7 +69,7 @@ an outage.
 
 | Tool | What it is for |
 |---|---|
-| `search_screens` | Find a screen from a business concept, in Hebrew or English. Searches an in-memory dictionary; start here. |
+| `search_screens` | Find a screen from a business concept, in Hebrew or English. Searches an in-memory dictionary; start here. `kinds: ['P','R']` searches the 9,000+ procedures and reports by title too, marking which the catalog allows to run. |
 | `describe_screen` | Columns with Hebrew titles, keys, types, sub-forms, screen help, and which table each column reads from. `depth` walks child screens; `includeColumnHelp` adds per-column help. |
 | `help` | Priority's own help for a screen, report, procedure, interface or menu — or for one column. The way to learn what a program DOES before running it. A permission refusal is reported as such, never as "no help". |
 | `query` | Read rows. `entity` + `filter`/`select`/`expand`/`orderby`, or a raw `path` for keyed navigation. `explain: true` returns the URL without calling Priority. |

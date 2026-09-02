@@ -155,13 +155,30 @@ export const searchScreensShape = {
         "default — this flag only adds screens that genuinely cannot be read, " +
         "which is useful to confirm a screen exists at all.",
     ),
+  kinds: z
+    .array(z.enum(["F", "P", "R"]))
+    .optional()
+    .describe(
+      "What to search: F screens (the default, and the only kind unless you say " +
+        "otherwise), P procedures, R reports. Pass ['P','R'] to find a program by " +
+        "its Hebrew title, or ['F','P','R'] for everything. Programs are described " +
+        "with help{type} and can only be RUN if 'runnable' is true.",
+    ),
 };
 
 export async function searchScreens(
   dict: PriorityDictionary,
-  input: { query: string; limit?: number; includeUnavailable?: boolean; includeUnpublished?: boolean },
+  input: {
+    query: string;
+    limit?: number;
+    includeUnavailable?: boolean;
+    includeUnpublished?: boolean;
+    kinds?: ("F" | "P" | "R")[];
+  },
   glossary?: Glossary,
   examples?: Examples,
+  /** Upper-cased names of the programs the operator's catalog allows to run. */
+  runnable: Set<string> = new Set(),
 ): Promise<unknown> {
   await dict.ready();
   // includeUnpublished is the former name of this flag. Still honoured so a
@@ -169,10 +186,36 @@ export async function searchScreens(
   const wantAll = input.includeUnavailable === true || input.includeUnpublished === true;
   const result = dict.search(input.query, {
     ...(input.limit === undefined ? {} : { limit: input.limit }),
+    ...(input.kinds?.length ? { kinds: input.kinds } : {}),
     onlyReadable: !wantAll,
   });
 
   const notes: string[] = [];
+
+  // Programs carry one more fact than screens: whether this server may run them.
+  // Priority has no way to enumerate runnable programs, so the catalog is the
+  // operator's decision, and a program outside it can be read about but not run.
+  const matches = result.matches.map((m) =>
+    m.kind === "F"
+      ? m
+      : {
+          ...m,
+          runnable: runnable.has(m.screen.toUpperCase()),
+          ...(runnable.has(m.screen.toUpperCase())
+            ? {}
+            : { catalogNote: "Not in programs.json — describable with help, not runnable here." }),
+        },
+  );
+  const programsShown = matches.filter((m) => m.kind !== "F").length;
+  if (programsShown) {
+    notes.push(
+      `${programsShown} of these are programs (kind P = procedure, R = report), not screens. ` +
+        `They cannot be queried. Read what one does with help{name, type}. ` +
+        `'runnable: true' means run_program accepts it; otherwise the operator must ` +
+        `add it to programs.json first -- say so rather than trying another name. ` +
+        `A name can exist as several kinds; pass the kind letter you mean.`,
+    );
+  }
 
   // Glossary hits are returned ALONGSIDE the ranked matches rather than merged
   // into them, and deliberately so: a curated mapping is a different kind of
@@ -264,7 +307,7 @@ export async function searchScreens(
     totalMatches: result.totalMatches,
     shown: result.shown,
     notes,
-    screens: result.matches,
+    screens: matches,
     dictionary: dict.stats(),
   };
 }
