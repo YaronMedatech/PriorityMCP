@@ -1,0 +1,30 @@
+﻿{
+  "_comment": [
+    "Per-caller Priority identities. COPY TO users.json AND FILL IN — the real file",
+    "holds credentials and is gitignored.",
+    "",
+    "Without users.json every caller shares the single Priority identity from .env,",
+    "so whoever holds the bearer token sees whatever that user can see. With it,",
+    "each caller presents their own token and every query they make runs under",
+    "their own Priority user, with that user's permissions.",
+    "",
+    "Tokens must be at least 16 characters and unique; entries failing either are",
+    "skipped with a warning at startup rather than silently accepted.",
+    "",
+    "MCP_AUTH_TOKEN keeps working alongside this and maps to the .env identity, so",
+    "adding this file does not lock out a client that already works."
+  ],
+  "users": [
+    {
+      "token": "generate-a-long-random-token-per-machine",
+      "label": "yaron-laptop",
+      "priorityUser": "PRIORITY_USERNAME",
+      "priorityPass": "PRIORITY_PASSWORD"
+    },
+    {
+      "token": "a-different-long-random-token",
+      "label": "read-only-tester",
+      "priorityToken": "A_PRIORITY_PERSONAL_ACCESS_TOKEN"
+    }
+  ]
+}

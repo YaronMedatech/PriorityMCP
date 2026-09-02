@@ -1,0 +1,52 @@
+<service>
+  <id>PriorityMCP</id>
+  <name>Priority MCP Server</name>
+  <description>MCP server over Priority ERP. Serves tools to Claude, Gemini and any other MCP client over HTTPS on port 3401.</description>
+
+  <!--
+    node.exe directly, not npm.
+    npm on Windows is a .ps1/.cmd shim: a service manager launching it gets the
+    shell rather than the server, and the process tree it has to stop is not the
+    one doing the work. Invoking node with tsx's own CLI keeps the service in
+    control of exactly one process.
+
+    Absolute paths throughout. A service does not inherit the PATH or the working
+    directory of any interactive shell.
+  -->
+  <executable>C:\Program Files\nodejs\node.exe</executable>
+  <arguments>"C:\Users\yaron\ClaudeProjects\PriorityMCP\node_modules\tsx\dist\cli.mjs" "C:\Users\yaron\ClaudeProjects\PriorityMCP\src\http.ts"</arguments>
+  <workingdirectory>C:\Users\yaron\ClaudeProjects\PriorityMCP</workingdirectory>
+
+  <!--
+    Delayed start: the listener binds a specific address and reads a certificate
+    from disk, and both can be briefly unavailable at boot. Starting a few seconds
+    later costs nothing and avoids a failed first start.
+  -->
+  <startmode>Automatic</startmode>
+  <delayedAutoStart/>
+
+  <!--
+    Restart on failure, with a gap that grows.
+    Immediate retries would spin uselessly through the one failure that actually
+    warrants stopping: a bad certificate or missing credentials, where the server
+    exits on purpose and no amount of retrying helps. After three attempts it
+    stays down and the log says why.
+  -->
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <onfailure action="restart" delay="120 sec"/>
+  <resetfailure>1 hour</resetfailure>
+
+  <!--
+    The server writes every diagnostic to stderr, on purpose: stdout is the
+    JSON-RPC channel for the stdio transport. Both are captured here.
+  -->
+  <logpath>C:\Users\yaron\ClaudeProjects\PriorityMCP\service\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>5</keepFiles>
+  </log>
+
+  <!-- Let an in-flight request finish rather than cutting it off. -->
+  <stoptimeout>15 sec</stoptimeout>
+</service>

@@ -1,0 +1,790 @@
+import { pathToFileURL } from "node:url";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { ConfigError, listEnvironments, loadConfig, resolveEnvironment } from "./config.js";
+import { CompanyContext } from "./companies.js";
+import { elicitCredentials, loadAuthPolicy } from "./auth.js";
+import { PriorityODataError } from "./odata.js";
+import { Examples, Glossary } from "./glossary.js";
+import {
+  aggregateShape,
+  describeScreen,
+  describeScreenShape,
+  distinctShape,
+  queryShape,
+  runQuery,
+  searchScreens,
+  searchScreensShape,
+} from "./discovery.js";
+import { runAggregate, runDistinct, type AggFn } from "./aggregate.js";
+import { buildReadiness } from "./readiness.js";
+import { getSales } from "./sales.js";
+import { salesInputShape, salesInputSchema } from "./salesSchema.js";
+import { z } from "zod";
+
+// MCP server over Priority's OData API.
+//
+// The shape is discovery-first: find a screen by its Hebrew name, learn what its
+// columns mean, then read it. get_sales remains as a curated fast path, but it is
+// no longer the only way in -- which matters because a hand-written map of screen
+// semantics is exactly what got CINVOICES wrong.
+//
+// stdout IS the protocol channel. A stray console.log here corrupts the JSON-RPC
+// stream and the client disconnects with a parse error that points nowhere near
+// the real cause. Every diagnostic in this file goes to stderr.
+const log = (msg: string) => process.stderr.write(`[priority-mcp] ${msg}\n`);
+
+/** One spelling of "on" for every flag, so .env behaves the same everywhere. */
+const envFlag = (name: string): boolean =>
+  ["1", "true", "yes"].includes((process.env[name] ?? "").trim().toLowerCase());
+
+const SALES_DESCRIPTION = `Read sales documents from Priority ERP for a date range.
+
+A curated shortcut over four invoice screens, with per-currency totals and
+storno pairing already worked out. For anything else -- or to check what a screen
+actually is -- use search_screens, describe_screen and query instead.
+
+  AINVOICES  tax invoice
+  EINVOICES  tax invoice + receipt; also carries payment lines
+  FINVOICES  export invoice
+  CINVOICES  consolidated invoice
+
+Reading the result:
+- Every total is grouped BY CURRENCY, and there is deliberately no single global
+  total. ANY document type can be denominated in a foreign currency -- not just
+  export invoices -- so always read each row's 'currency' rather than assuming one
+  from the document type. Never add figures from different currencies together;
+  report each currency separately, with its currency named.
+- Each document carries 'sign' and 'totalSigned' (total*sign), and 'netTotal' in
+  the summary applies those signs. Read them from the data rather than assuming a
+  screen's direction from its name.
+- If 'truncated' is true the results are INCOMPLETE and the totals are a lower
+  bound. Say so; do not present them as final.
+- Cancelled (storno) documents ARE included by default, because a cancellation is
+  a real dated event in the books. Priority cancels by writing a mirror-image
+  reversing document, so a cancellation is a PAIR that nets to zero.
+- The two halves are dated independently -- a sale booked in one month can be
+  reversed in a later one; the reversal is NOT backdated. So check the
+  'cancellations' block: 'straddlingRange' lists cancelled documents whose
+  counterpart falls outside the requested range. Each shifts the totals by its
+  full amount with nothing here to offset it, and is usually the explanation for
+  a period that looks unexpectedly negative or inflated. Say so when it is
+  non-empty, and offer to widen the date range.
+- 'skipped' lists screens the Priority server does not expose to the API. Those
+  document types are missing from the totals entirely -- report that too.
+
+Set includeLines only when the question is about parts or quantities; lines
+multiply the response size considerably.`;
+
+/**
+ * Build the server with its tools registered, independent of transport.
+ *
+ * Exported so the stdio entry point and the HTTP one expose exactly the same
+ * tools. Duplicating the registrations per transport is how the two drift.
+ */
+export function buildServer(
+  opts: { authHeader?: string; identity?: string; company?: string } = {},
+): McpServer {
+  // The company is held in a context rather than fixed here, so the model can
+  // list what exists, offer it, and switch when the user picks one. `ctx.client`
+  // and `ctx.dict` are read at CALL time, which is what makes a switch take
+  // effect for everything registered below.
+  let ctx: CompanyContext;
+  try {
+    // Fail fast and loudly on stderr: a config error surfaced as a tool error on
+    // every call is far harder to diagnose than a refusal to start.
+    const initial = resolveEnvironment(opts.company ?? null);
+    loadConfig(initial);
+    ctx = new CompanyContext(initial, opts.authHeader);
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      log(`configuration error:\n${err.message}`);
+      process.exit(1);
+    }
+    throw err;
+  }
+
+  const glossary = new Glossary();
+  const examples = new Examples();
+
+  const glossaryError = glossary.loadError;
+  if (glossaryError) {
+    log(`glossary unavailable (${glossaryError}) — business-term mapping is off`);
+  } else {
+    log(`glossary loaded: ${glossary.all().length} terms`);
+  }
+
+  // Where this session's Priority credentials come from. See src/auth.ts.
+  const authPolicy = loadAuthPolicy();
+
+  // run_program is the only tool here that can change anything, so it is the only
+  // thing read-only mode has to take away. The discovery and read tools are NEVER
+  // gated: strip search_screens or describe_screen and the model has no way to
+  // learn a screen name, so it starts inferring them from English codes -- which
+  // is the exact failure this server exists to prevent.
+  const readOnly = envFlag("PRIORITY_READ_ONLY");
+
+  // Stated in the instructions, not just enforced in the registration. A client
+  // puts these in its system prompt, and a model told it has a way to act will
+  // keep hunting for the tool that provides it.
+  const writeRule = readOnly
+    ? `- This server is READ-ONLY. It cannot change Priority data and cannot run any
+  program or procedure -- the operator turned that off. If a question can only be
+  answered by changing something, say that it cannot be done here.`
+    : `- This server is READ-ONLY except for run_program, which can change data and must
+  be called without inputs first to see what it would do.`;
+
+  // Which company this session starts on, stated up front.
+  //
+  // Without it every answer is ambiguous: "we invoiced 659,283" means nothing
+  // unless the reader knows which company was counted, and one installation here
+  // serves several. The model CAN move between them with use_company, so the rule
+  // is not "you are stuck here" but "say which company a figure came from, and
+  // never mix two in one answer".
+  const others = listEnvironments().filter((c) => c !== ctx.company);
+  const companyRule =
+    `- You are reading the Priority company '${ctx.company}'. Every figure you report ` +
+    `comes from it and from no other, so name the company whenever a number could be ` +
+    `mistaken for another company's.` +
+    (others.length
+      ? `\n- This installation also serves ${others.join(", ")}. Call list_companies to ` +
+        `get their real names from Priority, SHOW THAT LIST TO THE USER and let them ` +
+        `pick; then call use_company to switch. Do this whenever the user's question ` +
+        `might be about a different company, when they ask which companies exist, or ` +
+        `at the start of a session if it is not obvious which one they mean — do not ` +
+        `assume the default is the one they want. After switching, say which company ` +
+        `you moved to, and never mix figures from two companies in one answer.\n` +
+        `- Switching company changes THE DATA ONLY. Screen names, column titles, help ` +
+        `text and sub-form structure are defined for the whole installation and are ` +
+        `identical in every company, so do NOT re-run search_screens or describe_screen ` +
+        `after a switch — what you already learned about a screen still holds. Only the ` +
+        `rows differ. What CAN differ is whether a given screen is open to the API in ` +
+        `that company, so a read that fails after switching is a permission matter, not ` +
+        `a different screen.`
+      : "");
+
+  // Server-level instructions: the rules that belong to NO single tool.
+  //
+  // Clients place this in the system prompt. Without it, cross-cutting rules --
+  // case sensitivity, the discovery order, never summing currencies -- had to be
+  // repeated inside several tool descriptions, which is both wasteful and how the
+  // copies drift apart.
+  const INSTRUCTIONS = `This server reads a live Priority ERP installation. Its data is real: figures
+you report will be acted on, so accuracy matters more than completing an answer.
+
+How to approach a question:
+1. search_screens FIRST when the question names a business concept. Screen names
+   are opaque English codes whose meaning lives in the Hebrew title, and inferring
+   one from the other is unreliable -- CINVOICES reads like "credit invoices" and
+   is in fact consolidated invoices.
+2. describe_screen before reading a screen you have not used. Its help text says
+   what the screen is FOR, which is faster and safer than guessing from columns.
+3. column_values before filtering on any code column. Nothing states that IVTYPE
+   is 'A'; a filter on a value that does not exist returns zero rows and looks
+   exactly like "there is no data".
+4. aggregate for any total, count or "per X" question. query is for detail rows
+   and is capped, so a total built from it is wrong as soon as the data exceeds
+   one page.
+
+Rules that apply throughout:
+${companyRule}
+- Screen and column names are CASE-SENSITIVE. Copy them; do not retype them.
+- NEVER add amounts in different currencies together. Any document type here can
+  be denominated in a foreign currency. Report each currency separately, named.
+- A capped or partial result is not an answer. When a reply says hasMore,
+  truncated, or complete:false, either continue paging or say plainly that the
+  figure is a lower bound.
+- Cancellations in Priority are mirror-image reversing documents, and the two
+  halves can fall in different periods. A period that looks oddly negative or
+  inflated is usually a reversal whose original lies outside the range.
+${writeRule}
+- If something cannot be reached, say so and say why. Do not substitute a
+  different screen and present it as the answer.`;
+
+  const server = new McpServer(
+    { name: "priority", version: "0.3.0" },
+    { instructions: INSTRUCTIONS },
+  );
+
+  /**
+   * Make sure the session has an identity before anything reads Priority.
+   *
+   * Runs at most once per session and only when it has to. Returns a message to
+   * hand back to the caller when it cannot, rather than throwing: "you are not
+   * signed in" is an answer the model should relay to the user, not a crash.
+   */
+  let authAttempted = false;
+  let authProblem: string | null = null;
+  const ensureIdentity = async (): Promise<string | null> => {
+    if (ctx.hasCallerIdentity) return null;
+    if (authPolicy.mode === "shared") return null;
+
+    if (authPolicy.mode === "headers") {
+      return (
+        `This server is configured to require each caller's own Priority credentials ` +
+        `(PRIORITY_AUTH_MODE=headers), and none were sent. Add X-Priority-User and ` +
+        `X-Priority-Pass — or X-Priority-Token — to the MCP server entry in your ` +
+        `client's configuration file, then reconnect. They belong in the config, not ` +
+        `in this conversation.`
+      );
+    }
+
+    // elicit: ask once. A second prompt on every call would be worse than a
+    // clear refusal, so the outcome is remembered either way.
+    if (authAttempted) return authProblem;
+    authAttempted = true;
+
+    const outcome = await elicitCredentials(server, ctx.company);
+    if (outcome.authHeader) {
+      ctx.setAuthHeader(outcome.authHeader);
+      log("credentials received from the user via elicitation");
+      authProblem = null;
+      return null;
+    }
+
+    if (outcome.unsupported && authPolicy.fallback === "shared") {
+      log(`elicitation unavailable, falling back to the shared identity: ${outcome.problem ?? ""}`);
+      authProblem = null;
+      return null;
+    }
+
+    authProblem = outcome.problem ?? "Priority credentials are not available for this session.";
+    return authProblem;
+  };
+
+  const registered: string[] = [];
+
+  /** Shared wrapper: log the call, JSON the result, turn a throw into readable text. */
+  const handler =
+    <T>(name: string, run: (args: T) => Promise<unknown>) =>
+    async (args: T) => {
+      const started = Date.now();
+      const who = opts.identity ? `[${opts.identity}] ` : "";
+
+      // Logged BEFORE the call, and kept even though the outcome line below names
+      // the tool again: a call that never comes back logs nothing else, and a
+      // Priority server under load is exactly how that happens. This line is the
+      // only record of what was in flight.
+      //
+      // Arguments go in unredacted deliberately. No tool here accepts a
+      // credential -- that is why caller identities arrive as HTTP headers -- so
+      // there is nothing in args worth hiding, and truncating them would cost the
+      // filter that explains a wrong answer.
+      log(`${who}${name} ${JSON.stringify(args)}`);
+      try {
+        // Identity before data. Only reached when the policy needs one and the
+        // session does not have it yet; `shared` mode returns immediately.
+        const missing = await ensureIdentity();
+        if (missing) {
+          log(`  -> refused: no Priority identity`);
+          return {
+            content: [{ type: "text" as const, text: `Not signed in to Priority.\n\n${missing}` }],
+            isError: true,
+          };
+        }
+
+        const result = await run(args);
+        const text = JSON.stringify(result, null, 2);
+        // Size in characters, not rows: results are different shapes per tool and
+        // a generic row count would be a guess. Characters are comparable across
+        // all of them, and a reply that came back enormous is worth seeing.
+        log(`  -> ok ${Date.now() - started}ms, ${text.length} chars`);
+        return { content: [{ type: "text" as const, text }] };
+      } catch (err) {
+        // Hand the model a sentence it can act on or relay, not a stack trace.
+        const message =
+          err instanceof PriorityODataError || err instanceof Error ? err.message : String(err);
+        log(`  -> error ${Date.now() - started}ms: ${message}`);
+        return {
+          content: [{ type: "text" as const, text: `Priority call failed.\n\n${message}` }],
+          isError: true,
+        };
+      }
+    };
+
+  const READ_ONLY_HINTS = {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  } as const;
+
+  server.registerTool(
+    "search_screens",
+    {
+      title: "Find Priority screens by name",
+      annotations: READ_ONLY_HINTS,
+      description: `Search Priority's screen dictionary by Hebrew title, internal name, module or table.
+
+START HERE when a question names a business concept rather than a screen. Priority
+screen names are opaque English codes and their meaning lives in the Hebrew title,
+so inferring a screen's purpose from its code is unreliable: CINVOICES reads like
+"credit invoices" and is in fact consolidated invoices, while credit notes are a
+different screen entirely. Look it up rather than inferring it.
+
+Returns for each match: the internal name to use elsewhere (CASE-SENSITIVE), the
+Hebrew title, the underlying table, the module, and how to read it.
+'totalMatches' may exceed what is shown -- never assume you have seen every match.
+
+READ 'access' ON EVERY RESULT. It decides how the screen is queried, and guessing
+wrong looks like missing data rather than a mistake:
+  direct       a normal entity set -- query{entity: NAME}
+  via-parent   a SUB-FORM, not listed as an entity set. Read it through a screen
+               in 'parents': query{entity: PARENT, expand: "NAME_SUBFORM"} for
+               many rows, or query{path: "PARENT(key='...')/NAME_SUBFORM"} for one
+               parent's lines. describe_screen on the child also works and names
+               the parent. THAT ROUTE ALWAYS WORKS. Reading it directly as an
+               entity ALSO succeeds for some screens here -- the service document
+               under-reports on this installation -- so one direct attempt is
+               reasonable before ruling it out.
+  unavailable  not reachable by any route we know of. Report that; do not retry.
+
+Most screens in Priority are sub-forms, so 'via-parent' is the common case, not an
+edge case. A child screen appearing in these results IS readable; it just is not
+readable as an entity.
+
+When the reply carries a 'glossary' block, PREFER IT over 'screens'. Those are
+curated business-term mappings maintained by the operator, and they exist because
+title similarity gets these wrong: searching 'זיכוי' ranks 'נקודות זיכוי' (tax
+credit points) above 'חשבוניות זיכוי' (credit notes). Each entry's 'notes' records
+traps the titles do not show -- read them before using the screens.`,
+      inputSchema: searchScreensShape,
+    },
+    handler("search_screens", (args) => searchScreens(ctx.dict, args, glossary, examples)),
+  );
+  registered.push("search_screens");
+
+  server.registerTool(
+    "describe_screen",
+    {
+      title: "Describe a Priority screen's columns",
+      annotations: READ_ONLY_HINTS,
+      description: `Get one screen's columns, each with its Hebrew title, plus its keys and sub-forms.
+
+Use this before querying a screen you have not read before -- it tells you what the
+columns actually mean, which are mandatory, which are date-only, which are
+read-only, and which sub-forms hold the line items. Do not guess column names.
+
+Notes that matter when building a query afterwards:
+- 'keys' can be composite. A keyed path needs every part.
+- 'subforms' are NOT screens. Read them via expand, or a keyed path in query.
+- A column may show dateType 'Date' while its type is Edm.DateTimeOffset. Filter
+  literals still need the time component, e.g. 2025-01-01T00:00:00Z.
+- Wide screens: pass 'columns' to filter by name or Hebrew title instead of
+  reading hundreds of them.
+
+DEEP DIVE -- pass 'depth' (1-3) to walk the screen's sub-forms recursively and get
+the whole document structure in one call: header, its lines, and the lines' own
+sub-forms, each with columns and with 'via' naming the navigation property to
+reach it. Depth 1 usually costs no extra requests, because Priority returns a
+screen's relatives in the same metadata document. The reply is capped by screens
+and by total columns -- read 'budget.truncated' rather than assuming you saw
+everything, and combine 'depth' with 'columns' on wide screens.
+
+'includeColumnSources' adds, per column, its position on the form, its
+form-specific label, and the table.column a value is READ FROM. That last one
+often explains a column the title alone does not.
+
+HELP is included by default -- Priority's own Hebrew documentation for the screen,
+saying what it is for and how it relates to other screens. It is usually the
+fastest way to understand an unfamiliar screen, so read it before inferring
+purpose from column names. Its {ENTITY.TYPE} cross-references are resolved inline
+and also listed in 'helpReferences', which is how the help points you at the
+sub-form holding the line items. A deep walk carries help for child screens too.
+'help: null' means this screen has no help recorded; most do.`,
+      inputSchema: describeScreenShape,
+    },
+    handler("describe_screen", (args) => describeScreen(ctx.client, ctx.dict, args)),
+  );
+  registered.push("describe_screen");
+
+  server.registerTool(
+    "query",
+    {
+      title: "Read rows from a Priority screen",
+      annotations: READ_ONLY_HINTS,
+      description: `Read individual rows from any Priority screen. READ-ONLY.
+
+FOR TOTALS, COUNTS OR "PER X" QUESTIONS, USE 'aggregate' INSTEAD. This tool returns
+detail rows and is capped at 500 per call, so any total you build by adding up
+what it returns is wrong the moment the data exceeds one page. 'aggregate' pages
+the whole set outside the conversation and returns the grouped answer.
+
+Use 'entity' for a normal read, or 'path' for a keyed row or a sub-form.
+
+This server's OData has real limitations. Working around them after a failure
+wastes a turn, so respect them up front:
+- The 'in' operator and contains() both return 501. Use chained 'or'.
+- Long filters break the URL: about 50 'or' terms alone, ~25 alongside expand.
+- 'select' is ignored when 'expand' is set -- that combination truncates the
+  response on this server. Use a nested $select inside expand instead.
+- Avoid 'ne' on a nullable column; it drops the null rows silently.
+- 'top' caps TOTAL rows, not page size, and 500 is the ceiling.
+- Sub-forms are not entity sets; reach them via expand or a keyed path.
+
+READING A SCREEN LARGER THAN ONE PAGE -- use 'skip', not a hand-built path.
+Two separate ceilings apply: 500 rows, and a response size cap that a wide screen
+can hit well inside 500 rows. Either one makes the reply a PAGE, not the answer.
+When that happens the response carries 'hasMore' and 'nextSkip'; call again with
+skip=nextSkip, keeping entity, filter, select, expand and orderby byte-identical,
+until hasMore is false. Then combine the pages yourself. Passing select to fetch
+only the columns you need fits more rows per page and is usually faster.
+
+There is NO row total available: this server accepts $count and silently ignores
+it. So "how many are there?" can only be answered by paging to the end, and a
+count taken from a single page is a lower bound, never the answer.
+
+'path' is restricted to screens inside the configured company: a known entity,
+optional key parentheses, then navigation segments. Traversal, absolute URLs,
+$metadata and $count are refused.
+
+Read 'notes' on the response -- it reports when a result was capped or an option
+was ignored, and treating a capped result as complete produces wrong totals.`,
+      inputSchema: queryShape,
+    },
+    handler("query", (args) => runQuery(ctx.client, ctx.dict, args)),
+  );
+  registered.push("query");
+
+  server.registerTool(
+    "aggregate",
+    {
+      title: "Group and total rows from a Priority screen",
+      annotations: READ_ONLY_HINTS,
+      description: `Group, count and total rows WITHOUT pulling them into the conversation.
+
+USE THIS INSTEAD OF query FOR ANY "how much / how many / per month / by customer /
+top N" QUESTION. Priority cannot aggregate -- it accepts OData's $apply and
+silently ignores it, returning ungrouped rows -- so this server pages the data and
+groups it here. That paging costs no context, which is the whole point: 'sales per
+month' comes back as twelve rows instead of thousands, and the 500-row cap on
+query stops applying.
+
+Never try to aggregate by reading rows with query and adding them up. You would be
+limited to 500 rows per call, and a total built from a capped page is wrong.
+
+  groupBy    columns to group by; omit for one grand-total row
+  aggregate  [{fn, column, as}] with fn = count | sum | avg | min | max
+  filter     applied BEFORE grouping -- the main way to keep the scan cheap
+
+A DateTimeOffset column is grouped by DAY, not by exact timestamp. For months or
+years, group by the date and combine the days yourself, or filter to one period.
+
+Read 'complete'. When false the scan hit its ceiling and every total is a LOWER
+BOUND -- say so rather than presenting it as final. 'rowsScanned' tells you how
+much was actually read.`,
+      inputSchema: aggregateShape,
+    },
+    handler(
+      "aggregate",
+      (args: {
+        entity: string;
+        groupBy?: string[];
+        aggregate: { fn: AggFn; column?: string; as?: string }[];
+        filter?: string;
+        maxRows?: number;
+      }) =>
+        runAggregate(
+          ctx.client,
+          args.entity,
+          { groupBy: args.groupBy ?? [], aggregate: args.aggregate },
+          {
+            ...(args.filter === undefined ? {} : { filter: args.filter }),
+            ...(args.maxRows === undefined ? {} : { maxRows: args.maxRows }),
+          },
+        ),
+    ),
+  );
+  registered.push("aggregate");
+
+  server.registerTool(
+    "column_values",
+    {
+      title: "What values a column actually contains",
+      annotations: READ_ONLY_HINTS,
+      description: `List the values a column really takes, with how often each occurs.
+
+Call this BEFORE filtering on any code column you have not seen. Nothing in the
+metadata says that IVTYPE is 'A' or DEBIT is 'D', so filtering on a guessed value
+is easy -- and it fails silently: a filter on a value that does not exist returns
+zero rows, which reads as "there is no data" rather than "that code is wrong".
+This is the quietest way to get a confidently wrong answer out of this server.
+
+Also useful for spotting the shape of a column before grouping on it: a column
+with thousands of distinct values is an identifier, not a category.
+
+Returns values sorted by frequency. Read 'complete' -- when false, the scan was
+capped and rare values may be missing.`,
+      inputSchema: distinctShape,
+    },
+    handler("column_values", (args: { entity: string; column: string; filter?: string; limit?: number }) =>
+      runDistinct(ctx.client, args.entity, args.column, {
+        ...(args.filter === undefined ? {} : { filter: args.filter }),
+        ...(args.limit === undefined ? {} : { limit: args.limit }),
+      }),
+    ),
+  );
+  registered.push("column_values");
+
+  server.registerTool(
+    "list_companies",
+    {
+      title: "Priority companies available to this session",
+      annotations: READ_ONLY_HINTS,
+      description: `List the Priority companies this server can work with, with their real names.
+
+SHOW THIS LIST TO THE USER AND LET THEM CHOOSE. The 'company' field is the code
+used in use_company; the 'name' field is what the company is actually called,
+read from Priority's own ENVIRONMENT screen — that is the name to show a person,
+because a code like 'zepc' means nothing to them.
+
+Call it when the user asks which companies exist, when a question might concern a
+different company than the current one, or at the start of a session when it is
+not obvious which company is meant. Do not assume the active one is the intended
+one just because it is the default.
+
+'active: true' marks the company being read right now. 'name' can be null when
+the ENVIRONMENT screen is unreadable or empty — 'note' says which.`,
+      inputSchema: {},
+    },
+    handler("list_companies", async () => {
+      const companies = await ctx.describeAll();
+      const notOffered = await ctx.unofferedEnvironments();
+      return {
+        active: ctx.company,
+        companies,
+        ...(notOffered.length ? { notOfferedByThisServer: notOffered } : {}),
+        note:
+          "Show the user the 'name' of each company, not the code, and let them pick. " +
+          "Then call use_company with that company's code.",
+      };
+    }),
+  );
+  registered.push("list_companies");
+
+  server.registerTool(
+    "use_company",
+    {
+      title: "Switch to another Priority company",
+      annotations: READ_ONLY_HINTS,
+      description: `Change which Priority company every later call reads.
+
+Use it after the user picks one from list_companies. The switch applies to every
+tool from that point on — search_screens, query, aggregate, everything — and lasts
+for the rest of the session.
+
+Say which company you switched to, and do not carry figures across the switch: a
+total from the previous company is not comparable with one from this company
+unless you state both companies explicitly.
+
+An unknown company is refused and nothing changes; the reply lists what is
+available. Names are CASE-SENSITIVE.`,
+      inputSchema: {
+        company: z.string().describe("Company code from list_companies, e.g. 'demo'. CASE-SENSITIVE."),
+      },
+    },
+    handler("use_company", async (args: { company: string }) => {
+      const previous = ctx.company;
+      // switchTo validates through the same allowlist the transport uses; an
+      // invalid name throws and the handler turns it into a readable tool error,
+      // leaving the session on the company it was already using.
+      const now = ctx.switchTo(args.company);
+      const name = await ctx.currentName();
+      log(`company switched: ${previous} -> ${now}`);
+      return {
+        switched: true,
+        previousCompany: previous,
+        company: now,
+        name,
+        note:
+          `Every later call reads '${now}'${name ? ` (${name})` : ""}. Tell the user which ` +
+          `company you moved to, and do not compare figures across the switch without ` +
+          `naming both companies. THE DATA CHANGED, NOTHING ELSE: screen names, columns ` +
+          `and help are the same across companies, so there is no need to re-run ` +
+          `search_screens or describe_screen for screens you have already looked at.`,
+      };
+    }),
+  );
+  registered.push("use_company");
+
+  server.registerTool(
+    "readiness_report",
+    {
+      title: "Which screens can be asked about in natural language",
+      annotations: { ...READ_ONLY_HINTS, openWorldHint: false },
+      description: `Audit this installation for the gaps that make free-text questions fail.
+
+Run it when a question returned nothing, or returned something that looks wrong,
+and you want to know whether the data or the question was at fault. It reads the
+cached dictionary only, so it costs no requests.
+
+Reports, worst first: Hebrew titles shared by more than one readable screen (the
+finding that produces confidently WRONG answers rather than visible failures),
+readable screens with no Hebrew title, names that differ from another only by
+letter case, screens unreachable by any route, and glossary entries pointing at
+screens that no longer exist.
+
+Each issue carries a suggested fix. Most of them are fixed by adding a glossary
+entry rather than by changing anything in Priority.`,
+      inputSchema: {},
+    },
+    handler("readiness_report", async () => {
+      await ctx.dict.ready();
+      return buildReadiness(ctx.dict, glossary);
+    }),
+  );
+  registered.push("readiness_report");
+
+  server.registerTool(
+    "list_programs",
+    {
+      title: "List runnable Priority programs",
+      annotations: { ...READ_ONLY_HINTS, openWorldHint: false },
+      description: `List the Priority programs and reports this server is allowed to run.
+
+Priority provides NO way to enumerate runnable programs -- APPS/APP answer 404 and
+the program-definition screens are closed to the API. So this catalog is the only
+way to learn that a program exists. If what you need is not listed, say so and ask
+the operator to add it to programs.json; do not guess a name and try to run it.
+
+'type' is 'R' for a report (renders output) or 'P' for a procedure (can change
+data). Read 'notes' before running anything.`,
+      inputSchema: {},
+    },
+    handler("list_programs", async () => {
+      const err = ctx.programs.configError;
+      if (err) return { available: false, reason: err };
+      const catalog = ctx.programs.readCatalog();
+      return {
+        available: true,
+        count: catalog.length,
+        programs: catalog,
+        note:
+          "This list is maintained by the operator, not discovered from Priority. " +
+          "A program that is not here cannot be run by this server." +
+          (readOnly
+            ? " RUNNING IS DISABLED on this server (read-only mode): these can be " +
+              "described but not executed."
+            : ""),
+      };
+    }),
+  );
+  registered.push("list_programs");
+
+  if (readOnly) {
+    log("run_program is NOT registered (PRIORITY_READ_ONLY) — this server cannot change Priority data");
+  } else {
+    server.registerTool(
+      "run_program",
+      {
+        title: "Run a Priority program or report",
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+        description: `Run one of the programs from list_programs, optionally with parameters.
+
+Call it once WITHOUT inputs first: the reply lists the parameters the program is
+waiting for, each with its Hebrew title, and does not run it. Supply 'inputs'
+keyed by those titles on the second call.
+
+That two-step shape is not ceremony. Supplying parameters is what makes a
+procedure act, so guessing them is how you run something you did not intend.
+
+Status values: 'needs_input' (parameters listed, nothing ran), 'completed',
+'message' (Priority said something -- read 'messages'), 'not_found' (no such
+program), 'unmatched_inputs', 'error'.
+
+'unmatched_inputs' means one of your input keys matched no parameter and the
+program was NOT run -- 'unmatchedInputs' lists them. Fix the key to the exact
+'title', 'code' or 'field' from inputFields; do not retry with the same key.`,
+        inputSchema: {
+          name: z.string().describe("Program name from list_programs."),
+          inputs: z
+            .record(z.string(), z.string())
+            .optional()
+            .describe(
+              "Parameter values keyed by the exact 'title', 'code' or 'field' number " +
+                "from the first call's inputFields — any of the three works. Omit to " +
+                "discover the parameters without running. A key matching none of them " +
+                "refuses the whole run rather than silently using defaults.",
+            ),
+        },
+      },
+      handler("run_program", async (args: { name: string; inputs?: Record<string, string> }) => {
+        const err = ctx.programs.configError;
+        if (err) return { available: false, reason: err };
+
+        const entry = ctx.programs.findInCatalog(args.name);
+        if (!entry) {
+          const catalog = ctx.programs.readCatalog();
+          return {
+            refused: true,
+            reason:
+              `'${args.name}' is not in the program catalog, so this server will not run ` +
+              `it: it has no way to know the program's parameters or what running it ` +
+              `would do. Ask the operator to add it to programs.json. Report this ` +
+              `rather than trying a different name.`,
+            available: catalog.map((p) => `${p.name} (${p.type}) — ${p.description}`),
+          };
+        }
+
+        const result = args.inputs
+          ? await ctx.programs.run(entry.name, entry.type, args.inputs)
+          : await ctx.programs.probe(entry.name, entry.type);
+        return { ...result, catalogEntry: entry };
+      }),
+    );
+    registered.push("run_program");
+  }
+
+  // get_sales is off by default while the discovery tools are being evaluated.
+  // Leaving it registered would let the model reach for the curated shortcut and
+  // never exercise search_screens/describe_screen/query, which is precisely what
+  // needs testing. Set PRIORITY_ENABLE_GET_SALES=1 in .env to bring it back --
+  // the code is untouched, only the registration is gated.
+  if (envFlag("PRIORITY_ENABLE_GET_SALES")) {
+    server.registerTool(
+      "get_sales",
+      {
+        title: "Priority sales documents",
+        annotations: READ_ONLY_HINTS,
+        description: SALES_DESCRIPTION,
+        inputSchema: salesInputShape,
+      },
+      handler("get_sales", (args) => getSales(ctx.client, salesInputSchema.parse(args))),
+    );
+    registered.push("get_sales");
+  } else {
+    log("get_sales is hidden (set PRIORITY_ENABLE_GET_SALES=1 to expose it)");
+  }
+
+  // Name what IS registered rather than what is not. "Which tools does this
+  // client actually see" is the first thing anyone asks of a log, and counting
+  // absences is a poor way to answer it.
+  log(
+    `tools ready (${registered.length}): ${registered.join(", ")}` +
+      `${readOnly ? "  [READ-ONLY]" : ""}`,
+  );
+  log(`serving ${ctx.client.baseUrl}${opts.identity ? ` as ${opts.identity}` : ""}`);
+  return server;
+}
+
+/** stdio entry point. The HTTP one lives in http.ts. */
+async function main(): Promise<void> {
+  const server = buildServer();
+  await server.connect(new StdioServerTransport());
+  log("connected over stdio");
+}
+
+// Only claim stdio when this file is the process entry point. Without the guard,
+// http.ts importing buildServer() would also start a stdio server and both would
+// fight over the same streams.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((err: unknown) => {
+    log(`fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+    process.exit(1);
+  });
+}

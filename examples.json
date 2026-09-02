@@ -1,0 +1,75 @@
+{
+  "_comment": [
+    "Worked examples: a real question, and the calls that answer it.",
+    "",
+    "WHY. Oracle names few-shot examples as one of the strongest levers on NL2SQL",
+    "accuracy, and builds them from a feedback loop into a vector index. This is the",
+    "same idea at the scale this server needs: a small maintained file, matched by",
+    "keyword, surfaced when the question looks similar.",
+    "",
+    "Each example is a SHAPE, not an answer. It shows which tool to reach for and",
+    "which trap applies — the values will differ every time.",
+    "",
+    "Add one whenever a question takes several attempts to get right. The attempt",
+    "that finally worked is exactly what the next caller needs."
+  ],
+  "examples": [
+    {
+      "question": "מה המחזור שלנו ב-2024?",
+      "keywords": ["מחזור", "מכירות", "סך", "כמה מכרנו", "הכנסות", "revenue"],
+      "calls": [
+        "aggregate{entity:'AINVOICES', groupBy:[], aggregate:[{fn:'sum',column:'QPRICE'},{fn:'count'}], filter:\"IVDATE ge 2024-01-01T00:00:00Z and IVDATE lt 2025-01-01T00:00:00Z\"}"
+      ],
+      "notes": "Use aggregate, never query — a total built from query's 500-row page is wrong. Repeat per invoice screen (AINVOICES, EINVOICES, FINVOICES) and report each separately; CINVOICES may restate amounts already counted. Group by currency if the screen carries more than one."
+    },
+    {
+      "question": "מכירות לפי חודש",
+      "keywords": ["לפי חודש", "לפי תאריך", "מגמה", "per month", "by month"],
+      "calls": [
+        "aggregate{entity:'AINVOICES', groupBy:['IVDATE'], aggregate:[{fn:'sum',column:'QPRICE'}]}"
+      ],
+      "notes": "Dates group by DAY. Combine the days into months yourself, or filter to one month at a time. There is no month() function available in the filter."
+    },
+    {
+      "question": "מי הלקוחות הגדולים ביותר?",
+      "keywords": ["הלקוחות הגדולים", "top", "מובילים", "הכי הרבה", "דירוג"],
+      "calls": [
+        "aggregate{entity:'AINVOICES', groupBy:['CUSTNAME'], aggregate:[{fn:'sum',column:'QPRICE'},{fn:'count'}]}"
+      ],
+      "notes": "Groups come back largest first, so the top N is just the first N. CUSTNAME is the code; join to CUSTOMERS for the name, or read CDES if the invoice screen carries it."
+    },
+    {
+      "question": "אילו ערכים יש בעמודה הזו?",
+      "keywords": ["אילו ערכים", "מה האפשרויות", "סוגים", "קודים", "distinct"],
+      "calls": ["column_values{entity:'AINVOICES', column:'IVTYPE'}"],
+      "notes": "Do this BEFORE filtering on any code column. A filter on a value that does not exist returns zero rows, which reads as 'no data' rather than 'wrong code'."
+    },
+    {
+      "question": "תראה לי את שורות החשבונית",
+      "keywords": ["שורות", "פירוט", "מה נמכר", "פריטים בחשבונית", "line items"],
+      "calls": [
+        "query{entity:'AINVOICES', expand:\"AINVOICEITEMS_SUBFORM($select=PARTNAME,QUANT,PRICE)\", top:20}",
+        "query{path:\"AINVOICES(IVNUM='...',DEBIT='D',IVTYPE='A')/AINVOICEITEMS_SUBFORM\"}"
+      ],
+      "notes": "Lines are a sub-form, not a screen — query{entity:'AINVOICEITEMS'} returns 404. Use expand for many headers, a keyed path for one. Never combine a parent select with expand: it truncates the response."
+    },
+    {
+      "question": "כמה שורות יש במסך הזה?",
+      "keywords": ["כמה רשומות", "כמה שורות", "count", "סך הכל", "כמה יש"],
+      "calls": ["aggregate{entity:'PART', groupBy:[], aggregate:[{fn:'count'}]}"],
+      "notes": "There is no row total from the server — $count is accepted and ignored. aggregate pages to the end and counts, which is the only exact answer available."
+    },
+    {
+      "question": "מה זה המסך הזה ומה יש בו?",
+      "keywords": ["מה זה המסך", "מה העמודות", "הסבר על", "what is"],
+      "calls": ["describe_screen{screen:'PORDERS'}", "describe_screen{screen:'PORDERS', depth:1}"],
+      "notes": "Help text comes back by default and is usually the fastest way in — read it before inferring purpose from column names. depth:1 adds the sub-forms and normally costs no extra request."
+    },
+    {
+      "question": "חשבוניות שבוטלו",
+      "keywords": ["מבוטלות", "ביטול", "סטורנו", "זיכוי", "cancelled"],
+      "calls": ["search_screens{query:'חשבוניות זיכוי'}"],
+      "notes": "Priority cancels by writing a mirror-image reversing document, so a cancellation is a PAIR that nets to zero — and the two halves can fall in different periods. A month can look negative because a reversal landed in it while its original did not. Credit notes are SALECREDITINVOICES, a sub-form of SALES; CINVOICES is consolidated invoices, not credits."
+    }
+  ]
+}

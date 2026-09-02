@@ -1,0 +1,44 @@
+{
+  "_comment": [
+    "Runnable Priority programs and reports, for the run_program tool.",
+    "",
+    "This file exists because Priority offers no way to enumerate them: APPS/APP",
+    "answer HTTP 404 and PROGDESIGN/FREPORTS are closed to the API. So this catalog",
+    "is the discovery surface — a program absent from here is invisible to the model,",
+    "and run_program refuses it because the server has no way to know its parameters",
+    "or what running it would do.",
+    "",
+    "Seeded with the three reflection programs verified to exist in every Priority",
+    "installation. Add your own with a Hebrew description so the model can pick the",
+    "right one, and note in 'notes' anything a caller must know before running it.",
+    "",
+    "type: 'R' = report (reads and renders), 'P' = procedure (can change data).",
+    "Be deliberate about adding a 'P': supplying its parameters is what makes it act."
+  ],
+  "programs": [
+    {
+      "name": "FORMTREE",
+      "type": "P",
+      "description": "עץ מסכים — כל תתי-הטפסים של מסך, רקורסיבית, עם עומק וכותרת עברית",
+      "notes": "Takes 'Form Name'. Read-only. Returns Depth / Entity Name / Report Title / Type as a table, where the depth prefix (1, .2, ..3) shows nesting. Better than describe_screen for the shape of a screen's whole subtree: metadata navs show only one level at a time."
+    },
+    {
+      "name": "FORMTRIGREP",
+      "type": "R",
+      "description": "דוח טריגרים של מסך — מחזיר את כל הטריגרים ברמת המסך, כולל קוד מלא",
+      "notes": "Takes an internal form name, e.g. ORDERS. Read-only. The real content starts after the line 'Form Name ='."
+    },
+    {
+      "name": "FORMCLTRIGREP",
+      "type": "R",
+      "description": "דוח טריגרים ברמת עמודה — כל הטריגרים של עמודות המסך",
+      "notes": "Takes an internal form name. Read-only."
+    },
+    {
+      "name": "FORMMSG",
+      "type": "P",
+      "description": "מסרי מסך — כל ההודעות של מסך והמספרים התפוסים",
+      "notes": "Takes an internal form name. Present in every installation, which makes it the control when probing whether the program channel works at all."
+    }
+  ]
+}

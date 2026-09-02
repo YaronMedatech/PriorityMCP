@@ -1,0 +1,37 @@
+{
+  "_comment": [
+    "Gemini CLI configuration for this MCP server.",
+    "",
+    "Goes in ~/.gemini/settings.json on the CLIENT machine, or in .gemini/settings.json",
+    "inside a project. Fill in the credentials and delete this _comment block --",
+    "settings.json is strict JSON.",
+    "",
+    "httpUrl (not url) is the Streamable HTTP transport, which is what this server",
+    "speaks. 'url' is the older SSE transport and will not connect.",
+    "",
+    "TWO THINGS THE GEMINI CLI DOCS DO NOT COVER:",
+    "",
+    "1. TLS. This server uses a private CA, so the client must trust it. Gemini CLI",
+    "   runs on Node, so set NODE_EXTRA_CA_CERTS to the full path of mcp-ca.pem",
+    "   BEFORE launching it, or install mcp-ca.cer into the Windows root store.",
+    "   Without it the connection fails at the TLS handshake, before MCP starts,",
+    "   and the error will not mention certificates clearly.",
+    "",
+    "2. run_program is the only tool here that can change data. excludeTools removes",
+    "   it entirely for this client; use it unless that machine genuinely needs to",
+    "   run Priority procedures. 'trust': false keeps the confirmation prompt on",
+    "   every tool call and is the default -- do not set it to true on an ERP."
+  ],
+  "mcpServers": {
+    "priority": {
+      "httpUrl": "https://192.168.201.62:3401/mcp",
+      "headers": {
+        "X-Priority-User": "THEIR_PRIORITY_USERNAME",
+        "X-Priority-Pass": "THEIR_PRIORITY_PASSWORD"
+      },
+      "timeout": 120000,
+      "trust": false,
+      "excludeTools": ["run_program"]
+    }
+  }
+}

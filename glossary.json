@@ -1,0 +1,144 @@
+{
+  "_comment": [
+    "Business vocabulary → Priority screens, for natural-language questions.",
+    "",
+    "WHY THIS FILE EXISTS. A screen's meaning lives in its Hebrew title, and that",
+    "title is Priority's wording, not the user's. Someone asks about 'מחזור' and the",
+    "screen is 'חשבוניות מס'; asks about 'זיכוי' and ranking puts 'נקודות זיכוי'",
+    "above 'חשבוניות זיכוי'. No string matching bridges that, because the words",
+    "genuinely differ. Both SAP (synonyms) and Oracle (annotations + glossary) treat",
+    "this mapping as the decisive input to natural-language accuracy.",
+    "",
+    "MAINTAIN IT BY HAND. A wrong entry sends the model confidently to the wrong",
+    "screen, which is worse than no entry. Every screen name below was checked",
+    "against the live dictionary; tests/live.glossary.ts re-checks them all and",
+    "fails on any name that does not exist, so add entries and run it.",
+    "",
+    "FIELDS. term = the canonical Hebrew phrase. aliases = other spellings people",
+    "actually type, including English and singular/plural variants. screens = best",
+    "first. columns = where the value lives. notes = anything a caller must know",
+    "BEFORE trusting these screens for this term — read the CINVOICES note as the",
+    "example of why this field matters."
+  ],
+  "terms": [
+    {
+      "term": "מחזור",
+      "aliases": ["מחזור מכירות", "הכנסות", "מכירות", "turnover", "revenue"],
+      "screens": ["AINVOICES", "EINVOICES", "FINVOICES", "CINVOICES"],
+      "notes": "Sales revenue lives across FOUR invoice screens, not one, and totalling only AINVOICES understates it. CINVOICES is 'חשבוניות מרכזות' (consolidated) — it can restate amounts already counted in the others, so adding all four together may double-count. Ask which document types the question means. Also: any of them can be in a foreign currency, so group by currency and never add currencies together."
+    },
+    {
+      "term": "חשבונית מס",
+      "aliases": ["חשבוניות", "חשבונית", "invoice"],
+      "screens": ["AINVOICES", "AINVOICEITEMS"],
+      "notes": "AINVOICES is the header; AINVOICEITEMS is the line detail and is a sub-form of it, reachable via expand or a keyed path."
+    },
+    {
+      "term": "חשבונית מס קבלה",
+      "aliases": ["חשבונית קבלה"],
+      "screens": ["EINVOICES"],
+      "notes": "Invoice and receipt in one document; also carries the payment lines."
+    },
+    {
+      "term": "חשבונית חול",
+      "aliases": ["חשבונית יצוא", "יצוא", "export invoice"],
+      "screens": ["FINVOICES"],
+      "notes": "Export invoices. Usually foreign currency — read each row's currency rather than assuming."
+    },
+    {
+      "term": "חשבונית זיכוי",
+      "aliases": ["זיכוי", "זיכויים", "credit note"],
+      "screens": ["SALECREDITINVOICES"],
+      "notes": "SALECREDITINVOICES is a SUB-FORM of SALES and has no entity set — reading it directly returns 404. Note the trap this entry exists to prevent: CINVOICES looks like 'credit invoices' and is in fact consolidated invoices, and a plain search for 'זיכוי' ranks 'נקודות זיכוי' (tax credit points) above this."
+    },
+    {
+      "term": "קבלות",
+      "aliases": ["קבלה", "תקבולים", "receipt"],
+      "screens": ["TINVOICES"],
+      "notes": "Payments received from customers."
+    },
+    {
+      "term": "לקוחות",
+      "aliases": ["לקוח", "customer"],
+      "screens": ["CUSTOMERS"],
+      "columns": ["CUSTNAME", "CUSTDES"]
+    },
+    {
+      "term": "ספקים",
+      "aliases": ["ספק", "supplier", "vendor"],
+      "screens": ["SUPPLIERS"],
+      "columns": ["SUPNAME", "SUPDES"]
+    },
+    {
+      "term": "הזמנות לקוח",
+      "aliases": ["הזמנה", "הזמנות", "sales order"],
+      "screens": ["ORDERS", "ORDERITEMS"],
+      "notes": "ORDERS is 'הזמנות'. ORDERITEMS holds the lines and is a sub-form of it."
+    },
+    {
+      "term": "הזמנות רכש",
+      "aliases": ["רכש", "הזמנת רכש", "purchase order"],
+      "screens": ["PORDERS", "PORDERITEMS"],
+      "notes": "An approved purchase order cannot be changed on PORDERS; Priority's own help points to PORDERS_CHANGES for that."
+    },
+    {
+      "term": "תעודות משלוח",
+      "aliases": ["משלוחים", "תעודת משלוח", "delivery note"],
+      "screens": ["DOCUMENTS_D"],
+      "notes": "'משלוחים ללקוח'."
+    },
+    {
+      "term": "מוצרים",
+      "aliases": ["פריטים", "פריט", "מקט", "מק\"ט", "part", "item"],
+      "screens": ["PART", "LOGPART"],
+      "columns": ["PARTNAME", "PARTDES"],
+      "notes": "PART is the catalogue; LOGPART is 'כרטיס פריט'. Note that Priority calls this screen 'מוצרים' while users usually say 'פריטים'."
+    },
+    {
+      "term": "מלאי",
+      "aliases": ["יתרת מלאי", "מלאי נוכחי", "stock", "inventory"],
+      "screens": ["PARTBAL", "WAREHOUSES"],
+      "notes": "PARTBAL is 'מלאי נוכחי במחסנים'. It is published as an entity set but has been observed REFUSING reads with 'לא ניתן להפעיל API למסך זה' — if that happens the screen must be opened for the API in Priority, and it is not a naming problem."
+    },
+    {
+      "term": "חוב פתוח",
+      "aliases": ["חוב", "חובות", "יתרת לקוח", "אובליגו", "debt", "receivables"],
+      "screens": ["OBLIGO_FNCITEMS"],
+      "notes": "A sub-form of OBLIGO, so read it through the parent. Searching 'חוב' alone also surfaces AGEDEBTS_WORKAREA, which is a scratch work area rather than the ledger."
+    },
+    {
+      "term": "הצעות מחיר",
+      "aliases": ["הצעת מחיר", "quotation", "quote"],
+      "screens": ["CPROF"],
+      "notes": "'הצעות מחיר ללקוח'."
+    },
+    {
+      "term": "מחירונים",
+      "aliases": ["מחירון", "מחיר", "price list"],
+      "screens": ["PRICELIST"]
+    },
+    {
+      "term": "חשבונות ראשיים",
+      "aliases": ["הנהלת חשבונות", "כרטיס חשבון", "ספר חשבונות", "general ledger"],
+      "screens": ["ACCOUNTS"],
+      "notes": "Note that 'כרטיס חשבון' finds nothing by title search — this entry is the only route to it."
+    },
+    {
+      "term": "תנועות יומן",
+      "aliases": ["פקודות יומן", "journal"],
+      "screens": ["FNCITEMS"],
+      "notes": "FNCITEMS is 'פירוט התנועה', a sub-form of FNCTRANS."
+    },
+    {
+      "term": "מחסנים",
+      "aliases": ["מחסן", "warehouse"],
+      "screens": ["WAREHOUSES"]
+    },
+    {
+      "term": "תמחיר",
+      "aliases": ["עלות", "עלויות", "cost"],
+      "screens": ["MAKEPARTCOST", "RAWPARTCOST"],
+      "notes": "MAKEPARTCOST is 'תמחיר פריטי יצור' (manufactured), RAWPARTCOST is 'תמחיר ח\"ג' (raw materials). Which one depends on the item."
+    }
+  ]
+}

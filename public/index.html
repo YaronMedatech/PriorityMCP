@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Priority — נתוני מכירות</title>
+<script src="/vendor/marked/marked.umd.js"></script>
+<script src="/vendor/dompurify/purify.min.js"></script>
+<style>
+  :root {
+    --bg: #f7f6f3; --panel: #fff; --ink: #1a1a1a; --muted: #6b6b6b;
+    --line: #e3e1dc; --accent: #b4531f; --user: #eceae5;
+    --tool-bg: #f0f4f8; --tool-ink: #2c4a63; --err: #a11b1b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1a; --panel: #252523; --ink: #ecebe8; --muted: #a3a19c;
+      --line: #383835; --accent: #e08a52; --user: #313130;
+      --tool-bg: #223040; --tool-ink: #9dc4e4; --err: #ef8a8a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    padding: .7rem 1.1rem; border-bottom: 1px solid var(--line);
+    background: var(--panel); display: flex; align-items: center; gap: .8rem;
+  }
+  header h1 { margin: 0; font-size: 1rem; font-weight: 650; }
+  header .meta { font-size: .78rem; color: var(--muted); margin-inline-start: auto; }
+  header button {
+    font: inherit; font-size: .78rem; padding: .3rem .7rem; cursor: pointer;
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  header button:hover { color: var(--ink); border-color: var(--muted); }
+
+  #log { flex: 1; overflow-y: auto; padding: 1.1rem; }
+  .wrap { max-width: 62rem; margin: 0 auto; }
+  .msg { margin-bottom: 1.1rem; }
+  .msg .who { font-size: .74rem; color: var(--muted); margin-bottom: .3rem; }
+  .bubble {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: .75rem .95rem; line-height: 1.65;
+  }
+  .msg.user .bubble { background: var(--user); }
+  .bubble > :first-child { margin-top: 0; }
+  .bubble > :last-child { margin-bottom: 0; }
+  .bubble table {
+    border-collapse: collapse; margin: .6rem 0; font-size: .9rem;
+    display: block; overflow-x: auto; max-width: 100%;
+  }
+  .bubble th, .bubble td { border: 1px solid var(--line); padding: .35rem .6rem; text-align: start; }
+  .bubble th { background: var(--bg); font-weight: 600; }
+  .bubble code {
+    background: var(--bg); padding: .1rem .3rem; border-radius: 4px;
+    font-size: .88em; direction: ltr; display: inline-block;
+  }
+  .bubble pre { background: var(--bg); padding: .7rem; border-radius: 8px; overflow-x: auto; direction: ltr; }
+
+  .tool {
+    font-family: Consolas, monospace; font-size: .78rem; direction: ltr; text-align: left;
+    background: var(--tool-bg); color: var(--tool-ink);
+    border-radius: 8px; padding: .5rem .7rem; margin: .45rem 0;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .err { color: var(--err); border: 1px solid var(--err); border-radius: 8px; padding: .6rem .8rem; }
+  .usage { font-size: .72rem; color: var(--muted); margin-top: .35rem; }
+  .cursor::after {
+    content: "▍"; color: var(--accent);
+    animation: blink 1s steps(2) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  footer { border-top: 1px solid var(--line); background: var(--panel); padding: .8rem 1.1rem; }
+  form { max-width: 62rem; margin: 0 auto; display: flex; gap: .6rem; }
+  textarea {
+    flex: 1; font: inherit; resize: none; padding: .6rem .8rem;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--ink); min-height: 2.7rem; max-height: 11rem;
+  }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button.send {
+    font: inherit; padding: 0 1.2rem; cursor: pointer; border: none; border-radius: 8px;
+    background: var(--accent); color: #fff; font-weight: 600;
+  }
+  button.send:disabled { opacity: .45; cursor: default; }
+  .hint { max-width: 62rem; margin: .5rem auto 0; font-size: .74rem; color: var(--muted); }
+  .hint b { cursor: pointer; color: var(--accent); font-weight: 500; }
+  .hint b:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Priority — נתוני מכירות</h1>
+  <span class="meta" id="meta">מתחבר…</span>
+  <button id="reset" type="button">שיחה חדשה</button>
+</header>
+
+<div id="log"><div class="wrap" id="logInner"></div></div>
+
+<footer>
+  <form id="form">
+    <textarea id="input" rows="1" placeholder="שאל בעברית — למשל: כמה מכרנו ב-2022, ובאילו מטבעות?" autofocus></textarea>
+    <button class="send" id="send" type="submit">שלח</button>
+  </form>
+  <div class="hint">
+    לדוגמה:
+    <b>כמה מכרנו ב-2022, ובאילו מטבעות?</b> ·
+    <b>יש חשבוניות מבוטלות? איך הן משפיעות?</b> ·
+    <b>מי חמשת הלקוחות הגדולים ב-2022?</b>
+  </div>
+</footer>
+
+<script>
+const sessionId = "web-" + Math.random().toString(36).slice(2);
+const logInner = document.getElementById("logInner");
+const logEl = document.getElementById("log");
+const form = document.getElementById("form");
+const input = document.getElementById("input");
+const sendBtn = document.getElementById("send");
+const metaEl = document.getElementById("meta");
+
+marked.setOptions({ gfm: true, breaks: true });
+const render = (md) => DOMPurify.sanitize(marked.parse(md || ""));
+const atBottom = () => logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 80;
+const stick = (was) => { if (was) logEl.scrollTop = logEl.scrollHeight; };
+
+fetch("/api/meta").then(r => r.json())
+  .then(m => { metaEl.textContent = `${m.model} · ${m.tools.join(", ")}`; })
+  .catch(() => { metaEl.textContent = "לא מחובר"; });
+
+function addMsg(who, label) {
+  const msg = document.createElement("div");
+  msg.className = "msg " + who;
+  msg.innerHTML = `<div class="who">${label}</div>`;
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  msg.appendChild(bubble);
+  logInner.appendChild(msg);
+  logEl.scrollTop = logEl.scrollHeight;
+  return { msg, bubble };
+}
+
+// Auto-grow the textarea; Enter sends, Shift+Enter makes a new line.
+input.addEventListener("input", () => {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 176) + "px";
+});
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+});
+
+document.getElementById("reset").addEventListener("click", async () => {
+  await fetch("/api/reset", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  });
+  logInner.innerHTML = "";
+});
+
+document.querySelectorAll(".hint b").forEach(b => {
+  b.addEventListener("click", () => { input.value = b.textContent; input.focus(); });
+});
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const question = input.value.trim();
+  if (!question || sendBtn.disabled) return;
+
+  addMsg("user", "אתה").bubble.textContent = question;
+  input.value = "";
+  input.style.height = "auto";
+  sendBtn.disabled = true;
+
+  const { bubble } = addMsg("assistant", "Claude");
+  let text = "";
+  // Reassigned on turn_end: after a tool call the model writes into a fresh
+  // block, so this must not be const.
+  let textEl = document.createElement("div");
+  textEl.className = "cursor";
+  bubble.appendChild(textEl);
+
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, message: question }),
+    });
+    if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
+
+    // Parse the SSE stream by hand: EventSource cannot issue a POST.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+
+      for (const frame of frames) {
+        const evLine = frame.split("\n").find(l => l.startsWith("event: "));
+        const dataLine = frame.split("\n").find(l => l.startsWith("data: "));
+        if (!evLine || !dataLine) continue;
+        const event = evLine.slice(7).trim();
+        let data = {};
+        try { data = JSON.parse(dataLine.slice(6)); } catch { continue; }
+
+        const was = atBottom();
+        if (event === "delta") {
+          text += data.text;
+          textEl.innerHTML = render(text);
+          textEl.className = "cursor";
+        } else if (event === "tool") {
+          const t = document.createElement("div");
+          t.className = "tool";
+          t.textContent = `${data.name} ${JSON.stringify(data.input)}`;
+          bubble.insertBefore(t, textEl);
+        } else if (event === "turn_end") {
+          // A tool ran; the model will keep writing into a fresh block.
+          if (text.trim()) {
+            textEl.className = "";
+            const next = document.createElement("div");
+            next.className = "cursor";
+            bubble.appendChild(next);
+            text = "";
+            textEl = next;
+          }
+        } else if (event === "error") {
+          const e2 = document.createElement("div");
+          e2.className = "err";
+          e2.textContent = "שגיאה: " + data.message;
+          bubble.appendChild(e2);
+        } else if (event === "done") {
+          textEl.className = "";
+          const u = document.createElement("div");
+          u.className = "usage";
+          u.textContent = `טוקנים ${data.inputTokens}/${data.outputTokens} · ${data.stopReason}`;
+          bubble.appendChild(u);
+        }
+        stick(was);
+      }
+    }
+  } catch (err) {
+    const e2 = document.createElement("div");
+    e2.className = "err";
+    e2.textContent = "שגיאת תקשורת: " + err.message;
+    bubble.appendChild(e2);
+  } finally {
+    textEl.className = "";
+    sendBtn.disabled = false;
+    input.focus();
+  }
+});
+</script>
+</body>
+</html>
