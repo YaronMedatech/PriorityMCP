@@ -55,14 +55,18 @@ console.log(`   tools: ${names.join(", ")}`);
 const expected = [
   "aggregate",
   "column_values",
+  "continue_program",
   "describe_screen",
+  "get_skill",
   "help",
   "list_companies",
   "list_programs",
+  "list_skills",
   "query",
   "readiness_report",
   "run_program",
   "search_screens",
+  "start_program",
   "use_company",
 ];
 if (JSON.stringify(names) === JSON.stringify(expected)) {

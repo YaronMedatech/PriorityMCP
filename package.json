@@ -12,7 +12,7 @@
     "web": "tsx src/web.ts",
     "inspector": "npx @modelcontextprotocol/inspector tsx src/server.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx tests/metadata.test.ts && tsx tests/sales.test.ts && tsx tests/security.test.ts && tsx tests/environments.test.ts && tsx tests/auth.test.ts && tsx tests/ratelimit.test.ts && tsx tests/server.test.ts && tsx tests/toolgate.test.ts && tsx tests/help.test.ts && tsx tests/entitysearch.test.ts",
+    "test": "tsx tests/metadata.test.ts && tsx tests/sales.test.ts && tsx tests/security.test.ts && tsx tests/environments.test.ts && tsx tests/auth.test.ts && tsx tests/ratelimit.test.ts && tsx tests/server.test.ts && tsx tests/toolgate.test.ts && tsx tests/help.test.ts && tsx tests/entitysearch.test.ts && tsx tests/procsession.test.ts && tsx tests/skills.test.ts",
     "test:live": "tsx tests/live.aggregate2.ts && tsx tests/live.aggpage.ts && tsx tests/live.glossary.ts && tsx tests/live.screenhelp.ts && tsx tests/live.deep.ts && tsx tests/live.access.ts && tsx tests/live.traversal.ts && tsx tests/live.subformfacts.ts && tsx tests/live.switchcompany.ts && tsx tests/live.multicompany.ts && tsx tests/live.tls.ts"
   },
   "dependencies": {

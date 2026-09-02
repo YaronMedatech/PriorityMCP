@@ -79,7 +79,9 @@ an outage.
 | `use_company` | Switch the session's company. Changes the data only. |
 | `readiness_report` | Where the glossary, examples and dictionary have gaps. |
 | `list_programs` | The catalog of runnable programs (`programs.json`). |
-| `run_program` | Run one, through the Web SDK. The only tool that can change anything; `PRIORITY_READ_ONLY=1` removes it. |
+| `run_program` | Run one to completion, through the Web SDK. Stops with `needs_choice` rather than picking an option itself. `PRIORITY_READ_ONLY=1` removes it and the two below. |
+| `start_program` / `continue_program` | The same programs as an interactive session: `input`, `choose`, `message`, `askprint`, `displayurl`, `end` — the vocabulary Priority's own MCP uses. Every decision goes back to the user; an idle session is cancelled after 5 minutes. |
+| `list_skills` / `get_skill` | AI skills written inside Priority (`AIWORKFLOWS`, "AI סקילז"), listed and read in full. Reports a closed screen as a permission, not as "no skills". |
 
 Clients also receive ~3,100 characters of server-level instructions on `initialize`
 (the discovery order, case sensitivity, never summing currencies, how reversals work).
@@ -108,6 +110,8 @@ OData:
 | `EXEC/FORMHELP_SUBFORM` is reachable only by a keyed path; `$expand` returns **silently empty** | A negative result from an `$expand` on this server proves nothing on its own. |
 | `EXEC/FORMHELP_SUBFORM` answers **403** for screens, reports and procedures alike, while `EFORM(…)/FCLMN_SUBFORM(NAME=…)/FCLMNHELP_SUBFORM` returns text | Screen help and column help are permitted separately in Priority. `help` and `describe_screen` report a 403 as a permission, not as absent help. FCLMN's key is `NAME`. |
 | `EXEC` lists every entity with its title: 9,229 procedures and reports (P=4,806, R=4,423), all titled, fetched in ~6 s | It is the source for searching programs, since `PROGDESIGN`/`FREPORTS` are closed. |
+| `AIWORKFLOWS` ("AI סקילז") is in the service document yet answers **400 "לא ניתן להפעיל API למסך זה"** in every company | Skills exist as a feature; reading them needs the screen opened for the API or the API user given the "תחזוקת מערכת" module. `list_skills` says so. |
+| The Web SDK's endpoint `<host>/wcf/wcf/Service.svc` answers **403** on `t.eu.priority-connect.online`, at the root and under the tenant segments tried | `run_program` and the sessions cannot log in on this hosted installation until the tenant's WCF path is known; set `PRIORITY_HOST_URL` explicitly once it is. |
 | `TABTITLES`, `COLTITLES`, `TITLES`, `COLUMNS`, `FREPORTS`, `PROGDESIGN` → 400; `APPS`/`APP` → 404 | `EFORM` is the only channel for screen titles, and `programs.json` has to be maintained by hand because programs cannot be enumerated. |
 
 The dictionary comes from `EFORM` (~5,800 forms) and is cached on disk for 24 hours,

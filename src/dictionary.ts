@@ -194,7 +194,10 @@ export class PriorityDictionary {
   }
 
   private async load(): Promise<void> {
-    const cached = readCache(installationBase());
+    // The read is guarded as well as the write. An offline test that only skipped
+    // the write passed while the on-disk cache was an old version and started
+    // loading the real installation the moment a live run refreshed it.
+    const cached = this.opts.cache === false ? null : readCache(installationBase());
     if (cached) {
       this.ingest(cached.sets, cached.forms, cached.programs);
       process.stderr.write(

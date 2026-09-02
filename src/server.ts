@@ -7,6 +7,8 @@ import { elicitCredentials, loadAuthPolicy } from "./auth.js";
 import { PriorityODataError } from "./odata.js";
 import { Examples, Glossary } from "./glossary.js";
 import { ENTITY_KINDS, fetchColumnHelp, fetchEntityHelpOutcome } from "./help.js";
+import { fetchSkill, listSkills, matchSkills } from "./skills.js";
+import type { SessionAction } from "./programs.js";
 import {
   aggregateShape,
   describeScreen,
@@ -132,8 +134,10 @@ export function buildServer(
     ? `- This server is READ-ONLY. It cannot change Priority data and cannot run any
   program or procedure -- the operator turned that off. If a question can only be
   answered by changing something, say that it cannot be done here.`
-    : `- This server is READ-ONLY except for run_program, which can change data and must
-  be called without inputs first to see what it would do.`;
+    : `- This server is READ-ONLY except for run_program, start_program and
+  continue_program, which can change data. run_program must be called without
+  inputs first to see what it would do. When a program stops at a CHOICE or a
+  MESSAGE, stop and put it to the user -- never choose or acknowledge for them.`;
 
   // Which company this session starts on, stated up front.
   //
@@ -375,7 +379,27 @@ catalog does not list it -- report that, do not try a different name. The same
 name can be a screen, a report AND a procedure (FORMMSG is all three).`,
       inputSchema: searchScreensShape,
     },
-    handler("search_screens", (args) => searchScreens(ctx.dict, args, glossary, examples, runnableNames())),
+    handler("search_screens", async (args) => {
+      const result = (await searchScreens(ctx.dict, args, glossary, examples, runnableNames())) as Record<
+        string,
+        unknown
+      >;
+      // Skills authored in Priority, when the installation lets us read them.
+      // Cached for ten minutes including a refusal, so this costs nothing on an
+      // installation where the screen is closed.
+      const skills = matchSkills(await listSkills(ctx.client), String(args.query ?? ""));
+      if (!skills.length) return result;
+      return {
+        ...result,
+        skills,
+        notes: [
+          ...((result["notes"] as string[] | undefined) ?? []),
+          "'skills' are instructions written INSIDE Priority by its administrator for tasks " +
+            "like this one. Fetch the relevant one with get_skill and follow it; it outranks " +
+            "title similarity and usually the glossary too.",
+        ],
+      };
+    }),
   );
   registered.push("search_screens");
 
@@ -718,10 +742,60 @@ entry rather than by changing anything in Priority.`,
     },
     handler("readiness_report", async () => {
       await ctx.dict.ready();
-      return buildReadiness(ctx.dict, glossary, runnableNames());
+      const report = buildReadiness(ctx.dict, glossary, runnableNames());
+      const skills = await listSkills(ctx.client);
+      return {
+        ...report,
+        skills: skills.available
+          ? { available: true, count: skills.count }
+          : { available: false, reason: skills.reason },
+      };
     }),
   );
   registered.push("readiness_report");
+
+  server.registerTool(
+    "list_skills",
+    {
+      title: "AI skills defined inside Priority",
+      annotations: READ_ONLY_HINTS,
+      description: `List the AI skills an administrator has written INSIDE Priority (the "AI סקילז"
+screen, AIWORKFLOWS), for the current company.
+
+A skill is a set of instructions for how to carry out a business task in this
+installation -- which screens, which steps, which traps. When one matches the
+user's task, fetch it with get_skill and FOLLOW IT: it was written by someone who
+knows this installation, and it outranks anything inferred from screen titles.
+The operator's glossary (search_screens) is a different, complementary source.
+
+'available: false' carries a 'reason'. On many installations the screen is not
+yet opened for the API; that is not "there are no skills" -- say what the reason
+says.`,
+      inputSchema: {},
+    },
+    handler("list_skills", async () => listSkills(ctx.client)),
+  );
+  registered.push("list_skills");
+
+  server.registerTool(
+    "get_skill",
+    {
+      title: "Read one Priority AI skill in full",
+      annotations: READ_ONLY_HINTS,
+      description: `Fetch the full text of one skill from list_skills, by its 'key'.
+
+Pass the 'key' object exactly as list_skills returned it. The text is the
+administrator's instructions for the task; follow them ahead of your own
+inference about which screens to use.`,
+      inputSchema: {
+        key: z
+          .record(z.string(), z.union([z.string(), z.number()]))
+          .describe("The 'key' object of a skill from list_skills, verbatim."),
+      },
+    },
+    handler("get_skill", async (args: { key: Record<string, string | number> }) => fetchSkill(ctx.client, args.key)),
+  );
+  registered.push("get_skill");
 
   server.registerTool(
     "list_programs",
@@ -783,7 +857,11 @@ procedure act, so guessing them is how you run something you did not intend.
 
 Status values: 'needs_input' (parameters listed, nothing ran), 'completed',
 'message' (Priority said something -- read 'messages'), 'not_found' (no such
-program), 'unmatched_inputs', 'error'.
+program), 'unmatched_inputs', 'needs_choice', 'error'.
+
+'needs_choice' means the program asked to choose between options and this tool
+will not choose for you -- 'options' lists them and nothing ran. Use
+start_program + continue_program, where the user makes that choice.
 
 'unmatched_inputs' means one of your input keys matched no parameter and the
 program was NOT run -- 'unmatchedInputs' lists them. Fix the key to the exact
@@ -826,6 +904,91 @@ program was NOT run -- 'unmatchedInputs' lists them. Fix the key to the exact
       }),
     );
     registered.push("run_program");
+
+    const PROGRAM_HINTS = {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    } as const;
+
+    server.registerTool(
+      "start_program",
+      {
+        title: "Start a Priority program as an interactive session",
+        annotations: PROGRAM_HINTS,
+        description: `Start a program from list_programs and stop at the first step that needs a decision.
+
+Unlike run_program, nothing is decided here. The reply's 'step' says what Priority
+is waiting for and 'step.next' says exactly which continue_program action answers
+it:
+  input      parameters wanted        -> continue{input: {...}}
+  choose     a choice between options -> ask the USER, then continue{choose: index}
+  message    Priority said something  -> relay it; continue{acknowledge: true} or {cancel: true}
+  askprint   output is ready          -> continue{output: {format: 'HTML' | 'PDF'}}
+  displayurl still working            -> continue{poll: true}
+  end        finished; 'output' holds the report text, 'urls' any file links
+
+Choices and messages are the user's to make. A session left alone is cancelled
+after 5 minutes. Use run_program instead for a report whose parameters you
+already know and that asks no questions.`,
+        inputSchema: {
+          name: z.string().describe("Program name from list_programs."),
+        },
+      },
+      handler("start_program", async (args: { name: string }) => {
+        const err = ctx.programs.configError;
+        if (err) return { available: false, reason: err };
+        const entry = ctx.programs.findInCatalog(args.name);
+        if (!entry) {
+          return {
+            refused: true,
+            reason:
+              `'${args.name}' is not in the program catalog, so this server will not run ` +
+              `it. Ask the operator to add it to programs.json. Report this rather than ` +
+              `trying a different name.`,
+            available: ctx.programs.readCatalog().map((p) => `${p.name} (${p.type}) — ${p.description}`),
+          };
+        }
+        return { ...(await ctx.programs.start(entry.name, entry.type)), catalogEntry: entry };
+      }),
+    );
+    registered.push("start_program");
+
+    server.registerTool(
+      "continue_program",
+      {
+        title: "Answer the current step of a program session",
+        annotations: PROGRAM_HINTS,
+        description: `Send ONE action to a session opened by start_program and get the next step.
+
+Exactly one of: input, choose, acknowledge, output, poll, cancel. The right one is
+named in the previous reply's 'step.next'; sending a different one is refused
+without touching the program. 'choose' takes the 1-based 'index' from
+'step.options'. 'input' takes values keyed by a field's title, code or number.
+
+'done: true' means the session is over; its id is no longer valid.`,
+        inputSchema: {
+          session: z.string().describe("The 'session' id from start_program."),
+          action: z
+            .object({
+              input: z.record(z.string(), z.string()).optional(),
+              choose: z.number().int().positive().optional(),
+              acknowledge: z.literal(true).optional(),
+              output: z.object({ format: z.enum(["HTML", "PDF"]).optional() }).optional(),
+              poll: z.literal(true).optional(),
+              cancel: z.literal(true).optional(),
+            })
+            .describe("Exactly one key."),
+        },
+      },
+      handler("continue_program", async (args: { session: string; action: SessionAction }) => {
+        const err = ctx.programs.configError;
+        if (err) return { available: false, reason: err };
+        return ctx.programs.continue(args.session, args.action);
+      }),
+    );
+    registered.push("continue_program");
   }
 
   // get_sales is off by default while the discovery tools are being evaluated.
