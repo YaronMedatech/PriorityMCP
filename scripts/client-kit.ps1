@@ -123,9 +123,30 @@ Server: $url
 
 Troubleshooting, in order. Stop at the first that fails:
 
-  a. curl https://${ServerAddress}:${Port}/health   -> network / port / server up?
-  b. same call without -k                            -> is the CA installed?
-  c. client connects but no tools                    -> credentials wrong?
+  a. Is the server up and the port open?
+
+       curl --cacert mcp-ca.pem --ssl-revoke-best-effort https://${ServerAddress}:${Port}/health
+
+     Expect: {"ok":true,"transport":"streamable-http","auth":"bearer"}
+
+     --ssl-revoke-best-effort is required on WINDOWS and is not a way of
+     skipping verification. curl on Windows uses schannel, which insists on a
+     revocation source; this CA is private and publishes no CRL, so schannel
+     reports CERT_TRUST_REVOCATION_STATUS_UNKNOWN and refuses a certificate
+     that is in fact valid. The flag relaxes the revocation check ONLY -- the
+     signature and the host name are still verified. On Linux and macOS curl
+     uses OpenSSL and the flag is neither needed nor accepted.
+
+  b. Trust: if (a) fails with a certificate error, the CA is not installed.
+     Re-run install-ca.ps1 as Administrator, or set NODE_EXTRA_CA_CERTS.
+
+     Node-based clients (Claude Code, Gemini CLI) do not need the flag from
+     (a): Node uses OpenSSL, which does not require a revocation source.
+
+  c. Client connects but lists no tools -> the credentials are wrong.
+
+Never add -k, --insecure, or NODE_TLS_REJECT_UNAUTHORIZED=0. Those accept any
+server claiming this address, which is the one thing the certificate prevents.
 "@
 Set-Content -Path (Join-Path $OutDir "README.txt") -Value $readme -Encoding UTF8
 
