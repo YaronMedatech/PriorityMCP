@@ -56,6 +56,7 @@ const expected = [
   "aggregate",
   "column_values",
   "describe_screen",
+  "help",
   "list_companies",
   "list_programs",
   "query",

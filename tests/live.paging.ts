@@ -3,7 +3,8 @@
 // A remote client hit the 500-row and 200KB ceilings on PART and had to hand-build
 // raw OData paths to page around them. Before exposing paging through the query
 // tool, measure the behaviour rather than assume OData semantics hold -- this
-// server already answers 501 to `in` and contains().
+// reference installation answered 501 to `in` and contains(); the current one
+// (measured 2026-09-02) accepts contains() and refuses `in` with 403 instead.
 import { PriorityODataClient } from "../src/odata.js";
 import { loadEnvFile } from "../src/config.js";
 

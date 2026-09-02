@@ -6,6 +6,7 @@ import { CompanyContext } from "./companies.js";
 import { elicitCredentials, loadAuthPolicy } from "./auth.js";
 import { PriorityODataError } from "./odata.js";
 import { Examples, Glossary } from "./glossary.js";
+import { ENTITY_KINDS, fetchColumnHelp, fetchEntityHelpOutcome } from "./help.js";
 import {
   aggregateShape,
   describeScreen,
@@ -179,6 +180,8 @@ How to approach a question:
    is in fact consolidated invoices.
 2. describe_screen before reading a screen you have not used. Its help text says
    what the screen is FOR, which is faster and safer than guessing from columns.
+   For a single column, a report or a procedure, use help -- it reads Priority's
+   own documentation for that exact thing, including what a program will DO.
 3. column_values before filtering on any code column. Nothing states that IVTYPE
    is 'A'; a filter on a value that does not exist returns zero rows and looks
    exactly like "there is no data".
@@ -391,12 +394,74 @@ fastest way to understand an unfamiliar screen, so read it before inferring
 purpose from column names. Its {ENTITY.TYPE} cross-references are resolved inline
 and also listed in 'helpReferences', which is how the help points you at the
 sub-form holding the line items. A deep walk carries help for child screens too.
-'help: null' means this screen has no help recorded; most do.`,
+'help: null' comes with a 'helpNote' saying WHY. On some installations that reason
+is a permission refusal (HTTP 403): the help exists and this API user may not read
+it. Say that; do not report that the screen has no help.
+
+'includeColumnHelp: true' adds each shown column's own Priority help. It is one
+request per column and capped, so combine it with 'columns'. Column help is
+permitted separately from screen help and can be available where the screen's is
+refused.`,
       inputSchema: describeScreenShape,
     },
     handler("describe_screen", (args) => describeScreen(ctx.client, ctx.dict, args)),
   );
   registered.push("describe_screen");
+
+  server.registerTool(
+    "help",
+    {
+      title: "Priority's own help for a screen, column, report or procedure",
+      annotations: READ_ONLY_HINTS,
+      description: `Read Priority's own documentation for one thing: a screen (F), a report (R), a
+procedure (P), an interface (I), a menu (M) -- or a single COLUMN of a screen.
+
+describe_screen already includes a screen's help. Use this tool when you need:
+- what a REPORT or PROCEDURE does BEFORE running it (type 'R' or 'P'). Short of
+  running it, this is the only way to know.
+- what one COLUMN means (pass 'column') when its Hebrew title is not enough.
+  Priority documents columns individually; describe_screen fetches those only on
+  request because it is one call per column.
+
+The text is Priority's own, in Hebrew, with HTML removed and {ENTITY.TYPE}
+references resolved to names and titles where known; 'references' lists them as
+data.
+
+'available: false' carries a 'reason' -- READ IT. 'permission: true' means the help
+exists and this API user is not allowed to read it: say that, do not report that
+no help exists. Names are CASE-SENSITIVE, and one name can exist as several types
+(FORMMSG is both a report and a procedure), so pass the type you mean.`,
+      inputSchema: {
+        name: z.string().describe("Entity name, e.g. AINVOICES or FORMTRIGREP. CASE-SENSITIVE."),
+        type: z
+          .enum(["F", "P", "R", "I", "M"])
+          .optional()
+          .describe(
+            "F screen (default), P procedure, R report, I interface, M menu. Ignored " +
+              "when 'column' is given: column help belongs to screens.",
+          ),
+        column: z
+          .string()
+          .optional()
+          .describe(
+            "A column of the screen in 'name', e.g. CUSTNAME. Returns that column's " +
+              "own help instead of the screen's.",
+          ),
+      },
+    },
+    handler("help", async (args: { name: string; type?: string; column?: string }) => {
+      // Titles for {X.F} references come from the dictionary; make sure it is there.
+      await ctx.dict.ready();
+      if (args.column) {
+        const outcome = await fetchColumnHelp(ctx.client, ctx.dict, args.name, args.column);
+        return { name: args.name, column: args.column, kind: "column", ...outcome };
+      }
+      const type = args.type ?? "F";
+      const outcome = await fetchEntityHelpOutcome(ctx.client, ctx.dict, args.name, type);
+      return { name: args.name, type, kind: ENTITY_KINDS[type] ?? type, ...outcome };
+    }),
+  );
+  registered.push("help");
 
   server.registerTool(
     "query",
@@ -414,7 +479,8 @@ Use 'entity' for a normal read, or 'path' for a keyed row or a sub-form.
 
 This server's OData has real limitations. Working around them after a failure
 wastes a turn, so respect them up front:
-- The 'in' operator and contains() both return 501. Use chained 'or'.
+- contains(), startswith() and endswith() work in filter. The 'in' operator does
+  NOT (this server answers HTTP 403 to it) -- use chained 'or' instead.
 - Long filters break the URL: about 50 'or' terms alone, ~25 alongside expand.
 - 'select' is ignored when 'expand' is set -- that combination truncates the
   response on this server. Use a nested $select inside expand instead.

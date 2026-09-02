@@ -70,7 +70,8 @@ an outage.
 | Tool | What it is for |
 |---|---|
 | `search_screens` | Find a screen from a business concept, in Hebrew or English. Searches an in-memory dictionary; start here. |
-| `describe_screen` | Columns with Hebrew titles, keys, types, sub-forms, screen help, and which table each column reads from. `depth` walks child screens. |
+| `describe_screen` | Columns with Hebrew titles, keys, types, sub-forms, screen help, and which table each column reads from. `depth` walks child screens; `includeColumnHelp` adds per-column help. |
+| `help` | Priority's own help for a screen, report, procedure, interface or menu — or for one column. The way to learn what a program DOES before running it. A permission refusal is reported as such, never as "no help". |
 | `query` | Read rows. `entity` + `filter`/`select`/`expand`/`orderby`, or a raw `path` for keyed navigation. `explain: true` returns the URL without calling Priority. |
 | `aggregate` | Totals, counts and "per X". Computed server-side **here**, by paging — see the `$apply` note below. |
 | `column_values` | The distinct values a code column actually holds, with counts. Use before filtering on one. |
@@ -98,12 +99,15 @@ OData:
 | `$apply` is **accepted and ignored** | `aggregate` pages the rows and groups them here. A server-side group-by returns ungrouped rows with a 200. |
 | `$count` is likewise accepted and ignored | Counts come from paging, not from asking. |
 | No `@odata.nextLink` | Paging is driven by `$skip` until a short page arrives. |
-| `contains()` and `in` return **501** | Text search over Hebrew titles is client-side, on a cached dictionary. |
+| `in` is refused (**HTTP 403**); `contains()`, `startswith()`, `endswith()` work — re-measured 2026-09-02 on `t.eu.priority-connect.online`; an earlier installation answered **501** to `contains()` | Filters use chained `or`. Screen-title search stays client-side anyway, for ranking and Hebrew stemming. |
+| A `$filter` / `$orderby` **inside** `$expand` is honoured | `query`'s `expand` can carry per-child filters: `ITEMS_SUBFORM($filter=KLINE gt 1;$orderby=KLINE desc)`. |
 | `$select` on the parent **plus** `$expand` truncates the response mid-JSON | The parent `$select` is dropped whenever an expand is present. |
 | URL length limits at roughly 50 `or` terms (~25 with an expand) | Filters are chunked. |
 | The service document takes ~70 s | Metadata calls get their own 180 s budget, separate from the 45 s query budget. |
 | Screen and column names are **case-sensitive**, and ten pairs differ only by case (`DOCUMENTS_E` / `DOCUMENTS_e`) | Names are never case-folded, anywhere. |
 | `EXEC/FORMHELP_SUBFORM` is reachable only by a keyed path; `$expand` returns **silently empty** | A negative result from an `$expand` on this server proves nothing on its own. |
+| `EXEC/FORMHELP_SUBFORM` answers **403** for screens, reports and procedures alike, while `EFORM(…)/FCLMN_SUBFORM(NAME=…)/FCLMNHELP_SUBFORM` returns text | Screen help and column help are permitted separately in Priority. `help` and `describe_screen` report a 403 as a permission, not as absent help. FCLMN's key is `NAME`. |
+| `EXEC` lists every entity with its title: 9,229 procedures and reports (P=4,806, R=4,423), all titled, fetched in ~6 s | It is the source for searching programs, since `PROGDESIGN`/`FREPORTS` are closed. |
 | `TABTITLES`, `COLTITLES`, `TITLES`, `COLUMNS`, `FREPORTS`, `PROGDESIGN` → 400; `APPS`/`APP` → 404 | `EFORM` is the only channel for screen titles, and `programs.json` has to be maintained by hand because programs cannot be enumerated. |
 
 The dictionary comes from `EFORM` (~5,800 forms) and is cached on disk for 24 hours,

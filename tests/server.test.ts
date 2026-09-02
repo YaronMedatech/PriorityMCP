@@ -75,7 +75,9 @@ if (!query) {
   // burns a turn rediscovering each one.
   for (const [label, re] of [
     ["read-only", /READ-ONLY/i],
-    ["the 501 operators", /501/],
+    // Re-measured 2026-09-02: contains() works here and `in` is refused with 403.
+    // The warning has to name what is actually unsupported, not what once was.
+    ["the unsupported `in` operator", /['`]in['`] operator[\s\S]{0,80}403/],
     ["the select+expand truncation", /select.{0,40}ignored|expand/i],
   ] as const) {
     if (re.test(desc)) ok(`description warns about ${label}`);

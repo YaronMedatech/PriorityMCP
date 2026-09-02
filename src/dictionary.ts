@@ -12,11 +12,13 @@ import { PriorityODataClient } from "./odata.js";
 // "לא ניתן להפעיל API למסך זה", and APPS/APP answer 404. So the Hebrew name of
 // every screen comes from here or from nowhere.
 //
-// It is cached because searching it cannot happen server-side: Priority answers
-// 501 Not Implemented to the OData `contains()` function, so there is no way to
-// ask "which screens mention מלאי". The whole table is loaded once and matched
-// in memory, which is both cheaper and more capable than any sequence of round
-// trips.
+// It is cached and searched in memory rather than server-side. The original
+// reason was that the reference installation answered 501 Not Implemented to
+// contains(); the current one (t.eu.priority-connect.online, measured 2026-09-02)
+// accepts contains(), startswith() and endswith(). The design stands on its own
+// regardless: ranking, gershayim normalisation and Hebrew stemming are not things
+// an OData $filter can express, and one load of the table is cheaper than a
+// round trip per question.
 
 export interface ScreenEntry {
   /** Internal screen name, e.g. `AINVOICES`. Case is significant. */

@@ -126,30 +126,77 @@ function inlineReferences(text: string, refs: HelpReference[]): string {
 }
 
 /**
- * Fetch and clean the help for one entity.
+ * What a help read produced, including WHY it produced nothing.
  *
- * Returns null rather than throwing when there is no help: most screens have it
- * but not all, and on some installations the FORMHELP sub-form is refused
- * outright (HTTP 403) while EXEC itself reads fine. Either way that is a fact
- * about the installation rather than a failure of the description around it.
+ * `null` used to stand for every failure, and a caller turned it into "Priority
+ * has no help text recorded for this screen" -- which on this installation is
+ * false for every screen: the help is there and the API user is refused it (HTTP
+ * 403). A model told "no help exists" stops looking; a model told "you are not
+ * permitted to read it" can say so and the operator can fix it.
  */
-export async function fetchEntityHelp(
+export type HelpOutcome =
+  | { available: true; text: string; references: HelpReference[]; truncated?: boolean }
+  | { available: false; reason: string; permission?: true };
+
+const esc = (v: string): string => v.replace(/'/g, "''");
+
+/** `EXEC(ENAME='X',TYPE='F')/FORMHELP_SUBFORM` -- the only route that returns anything. */
+export function entityHelpPath(ename: string, type: string): string {
+  return `EXEC(ENAME='${esc(ename)}',TYPE='${esc(type)}')/FORMHELP_SUBFORM`;
+}
+
+/**
+ * Column help hangs off the form generator, not off EXEC:
+ * EFORM -> FCLMN (keyed by NAME) -> FCLMNHELP. Measured 2026-09-02: this path
+ * returns the text while the nested `$expand` form of the same request returns
+ * FCLMN rows with an empty FCLMNHELP_SUBFORM on every one -- the same silent-empty
+ * shape as FORMHELP. Also measured: FCLMNHELP reads fine on an installation where
+ * FORMHELP is refused with 403, so column help can exist where screen help does
+ * not. The two are permitted separately.
+ */
+export function columnHelpPath(screen: string, column: string): string {
+  return `EFORM(ENAME='${esc(screen)}',TYPE='F')/FCLMN_SUBFORM(NAME='${esc(column)}')/FCLMNHELP_SUBFORM`;
+}
+
+/** Turn the OData client's error into a reason a caller can act on. */
+export function explainHelpFailure(err: unknown, what: string): HelpOutcome & { available: false } {
+  const msg = (err instanceof Error ? err.message : String(err)).split("\n")[0] ?? "";
+  if (/HTTP 403/.test(msg)) {
+    return {
+      available: false,
+      permission: true,
+      reason:
+        `Priority refused to return ${what} (HTTP 403): the API user is not permitted to ` +
+        `read the help sub-form. The help itself exists; an operator can grant the ` +
+        `permission in Priority. Do not conclude that no help is recorded.`,
+    };
+  }
+  if (/HTTP 404/.test(msg)) {
+    return {
+      available: false,
+      reason: `${what} was not found (HTTP 404). Check the name, the type letter and the letter case.`,
+    };
+  }
+  return { available: false, reason: `${what} could not be read: ${msg}` };
+}
+
+async function readHelp(
   client: PriorityODataClient,
   dict: PriorityDictionary | undefined,
-  ename: string,
-  type = "F",
-): Promise<ScreenHelp | null> {
-  // Keyed path only -- see the note at the top of this file.
-  const safe = ename.replace(/'/g, "''");
+  path: string,
+  what: string,
+): Promise<HelpOutcome> {
   let rows: Record<string, unknown>[];
   try {
-    rows = await client.queryRawPath(`EXEC(ENAME='${safe}',TYPE='${type}')/FORMHELP_SUBFORM`);
-  } catch {
-    return null;
+    rows = await client.queryRawPath(path);
+  } catch (err) {
+    return explainHelpFailure(err, what);
   }
 
   const raw = String(rows[0]?.["TEXT"] ?? "");
-  if (!raw.trim()) return null;
+  if (!raw.trim()) {
+    return { available: false, reason: `Priority returned no help text for ${what}.` };
+  }
 
   let text = helpHtmlToText(raw);
   const truncated = text.length > MAX_HELP_CHARS;
@@ -165,5 +212,50 @@ export async function fetchEntityHelp(
     title: r.type === "F" ? (dict?.get(r.name)?.title ?? null) : null,
   }));
 
-  return { text: inlineReferences(text, references), references, ...(truncated ? { truncated } : {}) };
+  return {
+    available: true,
+    text: inlineReferences(text, references),
+    references,
+    ...(truncated ? { truncated } : {}),
+  };
+}
+
+/** Help for a screen (F), report (R), procedure (P), interface (I) or menu (M). */
+export function fetchEntityHelpOutcome(
+  client: PriorityODataClient,
+  dict: PriorityDictionary | undefined,
+  ename: string,
+  type = "F",
+): Promise<HelpOutcome> {
+  const kind = ENTITY_KINDS[type] ?? `type ${type}`;
+  return readHelp(client, dict, entityHelpPath(ename, type), `the help for ${kind} ${ename}`);
+}
+
+/** Help for one column of one screen, from FCLMNHELP. */
+export function fetchColumnHelp(
+  client: PriorityODataClient,
+  dict: PriorityDictionary | undefined,
+  screen: string,
+  column: string,
+): Promise<HelpOutcome> {
+  return readHelp(client, dict, columnHelpPath(screen, column), `the help for column ${column} of ${screen}`);
+}
+
+/**
+ * Fetch and clean the help for one entity, or null.
+ *
+ * Kept for callers that only want the text. Anything that will TELL a user why
+ * there is no help should use fetchEntityHelpOutcome instead, because null here
+ * hides a permission refusal behind the same value as genuinely absent text.
+ */
+export async function fetchEntityHelp(
+  client: PriorityODataClient,
+  dict: PriorityDictionary | undefined,
+  ename: string,
+  type = "F",
+): Promise<ScreenHelp | null> {
+  const outcome = await fetchEntityHelpOutcome(client, dict, ename, type);
+  if (!outcome.available) return null;
+  const { text, references, truncated } = outcome;
+  return { text, references, ...(truncated ? { truncated } : {}) };
 }

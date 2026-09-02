@@ -6,7 +6,7 @@ import {
   type EntityMetadata,
 } from "./odata.js";
 import type { PriorityDictionary, ScreenEntry } from "./dictionary.js";
-import { fetchEntityHelp, type HelpReference } from "./help.js";
+import { fetchColumnHelp, fetchEntityHelp, fetchEntityHelpOutcome, type HelpOutcome, type HelpReference } from "./help.js";
 import type { Examples, Glossary } from "./glossary.js";
 
 // The generic discovery + query layer: find a screen, learn what its columns
@@ -327,6 +327,15 @@ export const describeScreenShape = {
         "column each value is READ FROM, which is how you know what joins to what. " +
         "Default true; set false to skip the extra request. Root screen only.",
     ),
+  includeColumnHelp: z
+    .boolean()
+    .optional()
+    .describe(
+      "Also fetch each shown column's own Priority help text. One request per " +
+        "column, so it is off by default and capped -- combine with 'columns' to " +
+        "target the ones you need. Column help is permitted separately from screen " +
+        "help on some installations, so it can be present when 'help' is refused.",
+    ),
 };
 
 /**
@@ -344,6 +353,9 @@ const MAX_CHILD_COLUMNS = 60;
 const MAX_TREE_FETCHES = 12;
 /** Help is one keyed request per screen, so a wide tree needs a ceiling too. */
 const MAX_HELP_FETCHES = 25;
+/** Column help is one keyed request per COLUMN; a 200-column screen needs a ceiling. */
+const MAX_COLUMN_HELP = 40;
+const COLUMN_HELP_CONCURRENCY = 4;
 
 export async function describeScreen(
   client: PriorityODataClient,
@@ -355,6 +367,7 @@ export async function describeScreen(
     depth?: number;
     includeHelp?: boolean;
     includeColumnSources?: boolean;
+    includeColumnHelp?: boolean;
   },
 ): Promise<unknown> {
   await dict.ready();
@@ -498,16 +511,45 @@ export async function describeScreen(
     input.includeColumnSources === false
       ? Promise.resolve(undefined)
       : columnSources(client, described),
-    input.includeHelp === false ? Promise.resolve(null) : fetchEntityHelp(client, dict, described, "F"),
+    input.includeHelp === false
+      ? Promise.resolve(undefined)
+      : fetchEntityHelpOutcome(client, dict, described, "F"),
   ]);
+
+  // Column help: opt-in, capped, and probed once first. A permission refusal
+  // applies to every column alike, and forty identical 403s would say nothing
+  // the first one did not -- while costing forty round trips.
+  let columnHelp: Map<string, HelpOutcome> | undefined;
+  let columnHelpNote: string | undefined;
+  if (input.includeColumnHelp) {
+    columnHelp = new Map();
+    const wanted = shown.slice(0, MAX_COLUMN_HELP);
+    const lead = wanted[0];
+    const probe = lead ? await fetchColumnHelp(client, dict, described, lead.name) : undefined;
+    if (lead && probe && !probe.available && probe.permission) {
+      columnHelpNote = probe.reason;
+    } else {
+      if (lead && probe) columnHelp.set(lead.name, probe);
+      for (let i = 1; i < wanted.length; i += COLUMN_HELP_CONCURRENCY) {
+        const chunk = wanted.slice(i, i + COLUMN_HELP_CONCURRENCY);
+        const results = await Promise.all(chunk.map((c) => fetchColumnHelp(client, dict, described, c.name)));
+        chunk.forEach((c, n) => columnHelp!.set(c.name, results[n]!));
+      }
+      if (shown.length > wanted.length) {
+        columnHelpNote =
+          `Column help was fetched for the first ${wanted.length} of ${shown.length} columns ` +
+          `shown. Narrow with 'columns' to reach the others.`;
+      }
+    }
+  }
 
   return {
     screen: input.screen,
-    ...(help
-      ? { help: help.text, helpReferences: help.references.length ? help.references : undefined }
-      : input.includeHelp === false
-        ? {}
-        : { help: null, helpNote: "Priority has no help text recorded for this screen." }),
+    ...(help === undefined
+      ? {}
+      : help.available
+        ? { help: help.text, helpReferences: help.references.length ? help.references : undefined }
+        : { help: null, helpNote: help.reason }),
     ...(input.subform ? { subform: input.subform, describing: target.name } : {}),
     title: target.title ?? subject?.title ?? null,
     // From the described entity, not from whatever screen the caller named.
@@ -531,8 +573,14 @@ export async function describeScreen(
     columns: shown.map((c) => {
       const base = describeColumn(c);
       const src = sources?.get(c.name);
-      return src ? { ...base, ...src } : base;
+      const h = columnHelp?.get(c.name);
+      return {
+        ...base,
+        ...(src ?? {}),
+        ...(h ? (h.available ? { help: h.text } : { help: null }) : {}),
+      };
     }),
+    ...(columnHelpNote ? { columnHelpNote } : {}),
     ...(sources?.size
       ? {
           columnSourceNote:
@@ -542,8 +590,10 @@ export async function describeScreen(
             "means the column is computed or display-only rather than stored. " +
             "'joinedVia' appears on the few columns with an explicit join, and " +
             "'formLabel'/'formPosition' are the label and ordering as laid out on " +
-            "the screen. This is structural, not prose: the screen's written " +
-            "documentation is in the 'help' field.",
+            "the screen. 'hidden' marks a column the form does not display; " +
+            "'formReadOnly', 'width', 'decimals' and 'formType' are FCLMN's own " +
+            "flags, passed through as Priority stores them. This is structural, not " +
+            "prose: the screen's written documentation is in the 'help' field.",
         }
       : {}),
     ...(input.includeColumnSources !== false && !sources?.size
@@ -598,6 +648,16 @@ async function columnSources(
       // the source from it alone returned almost nothing.
       if (d["TNAME"] && d["CNAME"]) entry["readsFrom"] = `${String(d["TNAME"])}.${String(d["CNAME"])}`;
       if (d["JTNAME"] && d["JCNAME"]) entry["joinedVia"] = `${String(d["JTNAME"])}.${String(d["JCNAME"])}`;
+      // The flags form_columns in Priority's own MCP reports (Hidden, Readonly,
+      // Width, Decimal) are all here in FCLMN. Passed through as stored rather
+      // than interpreted: READONLY has been seen as 'M' as well as 'Y', and a
+      // guess at what 'M' means would be exactly the kind of assumption this
+      // server exists to avoid.
+      if (d["HIDEBOOL"] === "Y") entry["hidden"] = true;
+      if (d["READONLY"]) entry["formReadOnly"] = d["READONLY"];
+      if (typeof d["WIDTH"] === "number") entry["width"] = d["WIDTH"];
+      if (typeof d["DEC"] === "number") entry["decimals"] = d["DEC"];
+      if (d["TYPE"]) entry["formType"] = d["TYPE"];
       // No source at all means the value is computed or display-only rather than
       // stored, which is itself worth knowing about a column.
       if (!entry["readsFrom"] && !entry["joinedVia"] && (d["TITLE"] || d["COLTITLE"])) {
@@ -1049,9 +1109,10 @@ export const queryShape = {
     .optional()
     .describe(
       "OData $filter, e.g. \"IVDATE ge 2025-01-01T00:00:00Z and FINAL eq 'Y'\". " +
-        "NOT SUPPORTED by this server: the `in` operator and contains() both " +
-        "return 501 — use chained `or` instead. Avoid `ne` on a nullable column: " +
-        "it evaluates to null for the null rows and silently drops them.",
+        "Text matching works: contains(CUSTDES,'כהן'), startswith(...), endswith(...). " +
+        "The `in` operator is NOT supported (this server answers HTTP 403 to it) — " +
+        "use chained `or` instead. Avoid `ne` on a nullable column: it evaluates to " +
+        "null for the null rows and silently drops them.",
     ),
   select: z
     .string()
