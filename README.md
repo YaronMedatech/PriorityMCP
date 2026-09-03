@@ -191,6 +191,40 @@ passing quietly — a Priority permission that is closed must not read as a gree
 
 ---
 
+## Deploying to another server
+
+The repository is the whole application: there is no build, so a clone plus
+`npm ci` is a running server. Four things are deliberately **not** in git and have
+to exist on the new machine.
+
+```powershell
+git clone https://github.com/<you>/PriorityMCP.git
+cd PriorityMCP
+npm ci                                  # package-lock.json pins what this was verified against
+copy .env.example .env                  # then fill it in -- every setting is documented in place
+npm run probe                           # first proof: credentials and connectivity
+```
+
+| Not in git | What to do on the new server | Why it is excluded |
+|---|---|---|
+| `.env` | Copy `.env.example` and fill it in. Set **`PRIORITY_HOSTING`** for that installation. | Holds the PAT, the password and the bearer token. |
+| `certs/` | `powershell -ExecutionPolicy Bypass -File scripts/make-cert.ps1` — **regenerate, do not copy**. | The certificate names the machine it was made on; another server's name and IP are not in it, so a copied one fails host verification. |
+| `service/priority-mcp.exe` | Download WinSW (`WinSW-x64.exe`) and save it under that name, or copy it across. | A third-party binary; `service/*.exe` keeps binaries out of history. |
+| `node_modules/` | `npm ci`. | 336 MB. |
+
+Everything else regenerates: the dictionary cache refetches on first use (~20 s),
+`client-kit/` comes from `scripts/client-kit.ps1`, and `service/logs/` is created by
+the service.
+
+Then install it as a service, exactly as above. `service/priority-mcp.xml` needs no
+editing — its paths use WinSW's `%BASE%`, so they follow the checkout. The one line
+to check is `<executable>`: it points at `C:\Program Files\nodejs\node.exe`, the
+default install location.
+
+Per-installation settings worth a second look before starting: `PRIORITY_HOSTING`,
+`PRIORITY_ODATA_URL` + `PRIORITY_ENVIRONMENTS`, `PRIORITY_READ_ONLY`, and a **new**
+`MCP_AUTH_TOKEN` — a token shared between two servers means one leak exposes both.
+
 ## Layout
 
 ```

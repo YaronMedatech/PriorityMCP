@@ -10,12 +10,18 @@
     one doing the work. Invoking node with tsx's own CLI keeps the service in
     control of exactly one process.
 
-    Absolute paths throughout. A service does not inherit the PATH or the working
-    directory of any interactive shell.
+    %BASE% is WinSW's own variable for the folder holding this file, so every
+    path below is relative to the checkout and this file needs no editing when
+    the project is cloned to another server. Nothing may be relative to the
+    CURRENT directory: a service does not inherit the working directory, or the
+    PATH, of any interactive shell.
+
+    node.exe is the one absolute path left, at the default Windows install
+    location. Change it if Node lives elsewhere on the target machine.
   -->
   <executable>C:\Program Files\nodejs\node.exe</executable>
-  <arguments>"C:\Users\yaron\ClaudeProjects\PriorityMCP\node_modules\tsx\dist\cli.mjs" "C:\Users\yaron\ClaudeProjects\PriorityMCP\src\http.ts"</arguments>
-  <workingdirectory>C:\Users\yaron\ClaudeProjects\PriorityMCP</workingdirectory>
+  <arguments>"%BASE%\..\node_modules\tsx\dist\cli.mjs" "%BASE%\..\src\http.ts"</arguments>
+  <workingdirectory>%BASE%\..</workingdirectory>
 
   <!--
     Delayed start: the listener binds a specific address and reads a certificate
@@ -41,7 +47,7 @@
     The server writes every diagnostic to stderr, on purpose: stdout is the
     JSON-RPC channel for the stdio transport. Both are captured here.
   -->
-  <logpath>C:\Users\yaron\ClaudeProjects\PriorityMCP\service\logs</logpath>
+  <logpath>%BASE%\logs</logpath>
   <log mode="roll-by-size">
     <sizeThreshold>10240</sizeThreshold>
     <keepFiles>5</keepFiles>
