@@ -5,6 +5,7 @@ import { ConfigError, detectHosting, listEnvironments, loadConfig, resolveEnviro
 import { CompanyContext } from "./companies.js";
 import { elicitCredentials, loadAuthPolicy } from "./auth.js";
 import { PriorityODataError } from "./odata.js";
+import { CallerError } from "./errors.js";
 import { Examples, Glossary } from "./glossary.js";
 import { ENTITY_KINDS, fetchColumnHelp, fetchEntityHelpOutcome } from "./help.js";
 import { fetchSkill, listSkills, matchSkills } from "./skills.js";

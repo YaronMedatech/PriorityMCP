@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { loadWebSdkConfig, type WebSdkConfig } from "./config.js";
+import { CallerError } from "./errors.js";
 
 // Running Priority programs and reports, over the Web SDK.
 //
@@ -484,7 +485,7 @@ export class ProgramRunner {
     this.sweep();
     const sess = this.sessions.get(sessionId);
     if (!sess) {
-      throw new Error(
+      throw new CallerError(
         `No open program session '${sessionId}'. It has ended, been cancelled, or ` +
           `expired after ${SESSION_TTL_MS / 60_000} minutes without activity. Call ` +
           `start_program again.`,
@@ -492,7 +493,7 @@ export class ProgramRunner {
     }
     const keys = (Object.keys(action) as (keyof SessionAction)[]).filter((k) => action[k] !== undefined);
     if (keys.length !== 1) {
-      throw new Error(
+      throw new CallerError(
         `continue_program takes exactly ONE action; got ${keys.length ? keys.join(", ") : "none"}. ` +
           `Use one of: input, choose, acknowledge, output, poll, cancel.`,
       );
@@ -512,8 +513,8 @@ export class ProgramRunner {
     const proc = sess.step?.proc;
     const current = String(sess.step?.type ?? "");
     const mismatch = (wanted: string): never => {
-      throw new Error(
-        `The session is at a '${publicKind(current)}' step, which '${wanted}' does not answer. ` +
+      throw new CallerError(
+        `The session is at the '${publicKind(current)}' step, which '${wanted}' does not answer. ` +
           `Read 'step.next' in the last reply and send the action it asks for.`,
       );
     };
@@ -523,7 +524,7 @@ export class ProgramRunner {
       const fields = sess.step?.input?.EditFields ?? [];
       const unmatched = unmatchedKeys(fields, action.input);
       if (unmatched.length) {
-        throw new Error(
+        throw new CallerError(
           `These input keys match no parameter of ${sess.program}: ${unmatched.join(", ")}. ` +
             `Use the exact 'title', 'code' or 'field' from the step's fields. Nothing was sent.`,
         );
@@ -533,7 +534,7 @@ export class ProgramRunner {
       if (current !== "inputOptions") mismatch("choose");
       const n = describeOptions(sess.step?.input?.Options ?? []).length;
       if (!Number.isInteger(action.choose) || action.choose < 1 || (n && action.choose > n)) {
-        throw new Error(`choose must be an option index from 1 to ${n || "?"}; got ${action.choose}.`);
+        throw new CallerError(`choose must be an option index from 1 to ${n || "?"}; got ${action.choose}.`);
       }
       sess.step = await proc?.inputOptions?.(1, action.choose);
     } else if (action.acknowledge) {

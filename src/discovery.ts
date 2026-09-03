@@ -8,6 +8,7 @@ import {
 import type { PriorityDictionary, ScreenEntry } from "./dictionary.js";
 import { fetchColumnHelp, fetchEntityHelp, fetchEntityHelpOutcome, type HelpOutcome, type HelpReference } from "./help.js";
 import type { Examples, Glossary } from "./glossary.js";
+import { CallerError } from "./errors.js";
 
 // The generic discovery + query layer: find a screen, learn what its columns
 // mean, then read it. Replaces the need to hardcode a per-domain method, which
@@ -27,7 +28,7 @@ export const MAX_RESPONSE_CHARS = 200_000;
 const MAX_COLUMNS_SHOWN = 150;
 
 /** Raised when a raw `path` would leave the configured company. */
-export class UnsafePathError extends Error {
+export class UnsafePathError extends CallerError {
   constructor(message: string) {
     super(message);
     this.name = "UnsafePathError";

@@ -6,6 +6,7 @@
 // vocabulary (inputFields, inputOptions, reportOptions, displayUrl, message, end)
 // so the mapping to the public one (input, choose, askprint, ...) is exercised.
 import { ProgramRunner, htmlToText } from "../src/programs.js";
+import { CallerError } from "../src/errors.js";
 
 let failures = 0;
 const ok = (m: string) => console.log(`  ok   ${m}`);
@@ -171,7 +172,32 @@ console.log("\n4. A program that does not exist");
   else bad(`missing program: ${JSON.stringify(s.step).slice(0, 200)}`);
 }
 
-console.log("\n5. htmlToText keeps rows and cells apart");
+console.log("\n5. Session misuse is a CallerError, not a Priority failure");
+{
+  // The tool wrapper words the two differently, and the difference is what stops
+  // a model reporting an ERP outage over an argument it chose itself.
+  const log: string[] = [];
+  const runner = new ProgramRunner(undefined, scriptedProgram(log) as unknown as Record<string, unknown>);
+  const s1 = await runner.start("FORMTRIGREP", "R");
+  const cases: [string, () => Promise<unknown>][] = [
+    ["wrong action for the step", () => runner.continue(s1.session, { choose: 1 })],
+    ["two actions at once", () => runner.continue(s1.session, { poll: true, cancel: true })],
+    ["unknown session", () => runner.continue("no-such-session", { poll: true })],
+    ["option index out of range", () => runner.continue(s1.session, { choose: 99 })],
+  ];
+  for (const [label, run] of cases) {
+    try {
+      await run();
+      bad(`${label} was accepted`);
+    } catch (err) {
+      if (err instanceof CallerError) ok(`${label} -> CallerError`);
+      else bad(`${label} -> ${err instanceof Error ? err.constructor.name : typeof err}`);
+    }
+  }
+  await runner.continue(s1.session, { cancel: true });
+}
+
+console.log("\n6. htmlToText keeps rows and cells apart");
 const t = htmlToText("<html><head><style>x</style></head><body><table>\n  <tr>\n    <td>a</td>\n    <td>b</td>\n  </tr>\n  <tr><td>c</td></tr></table></body></html>");
 if (t === "a\tb\nc") ok("pretty-printed HTML flattens to a\\tb / c");
 else bad(`got ${JSON.stringify(t)}`);
