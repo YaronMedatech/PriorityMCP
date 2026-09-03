@@ -9,7 +9,7 @@ import { CallerError } from "./errors.js";
 import { Examples, Glossary } from "./glossary.js";
 import { ENTITY_KINDS, fetchColumnHelp, fetchEntityHelpOutcome } from "./help.js";
 import { fetchSkill, listSkills, matchSkills } from "./skills.js";
-import type { SessionAction } from "./programs.js";
+import type { InputValue, SessionAction } from "./programs.js";
 import { loadProgramDenyList, loadProgramPolicy, resolveProgram } from "./programselect.js";
 import {
   aggregateShape,
@@ -321,6 +321,21 @@ ${writeRule}
         };
       }
     };
+
+  /**
+   * One parameter value: a bare string, or the object form that carries an
+   * operator and a second value. Priority's input dialogs are filters as much as
+   * they are forms -- 'between these two dates' is an operator, not a value --
+   * and a string-only schema cannot say it.
+   */
+  const INPUT_VALUE = z.union([
+    z.string(),
+    z.object({
+      value: z.string(),
+      operator: z.number().int().optional().describe("An 'op' from the step's operators list."),
+      value2: z.string().optional().describe("The upper bound, when the operator is a range."),
+    }),
+  ]);
 
   const READ_ONLY_HINTS = {
     readOnlyHint: true,
@@ -933,12 +948,25 @@ running them.`,
 
 ${programScope}
 
-Call it once WITHOUT inputs first: the reply lists the parameters the program is
-waiting for, each with its Hebrew title, and does not run it. Supply 'inputs'
-keyed by those titles on the second call.
+Call it once WITHOUT inputs first. The reply does not run anything and carries
+everything Priority knows about the dialog it would show a person:
+  dialog.text     what the program DOES, in Priority's own words
+  inputFields[]   each parameter with its title, its 'help' in prose, its type
+                  and 'format' (a date says DD/MM/YY), 'maxLength', whether it is
+                  'mandatory', and 'defaultValue' -- the value Priority already
+                  has from the previous run
+  inputFields[].lookup  where legal values come from, e.g. 'EXEC.ENAME', which
+                  you can read with the query tool to find one instead of guessing
+  operators[]     the comparisons a parameter may use
+
+SHOW THAT TO THE USER before running a procedure: the titles and help are what a
+Priority user sees, and 'defaultValue' is what will be used if you say nothing.
+Then supply 'inputs' on the second call.
 
 That two-step shape is not ceremony. Supplying parameters is what makes a
 procedure act, so guessing them is how you run something you did not intend.
+
+A parameter you do not mention KEEPS its defaultValue -- it is not blanked.
 
 Status values: 'needs_input' (parameters listed, nothing ran), 'completed',
 'message' (Priority said something -- read 'messages'), 'not_found' (no such
@@ -961,19 +989,22 @@ program was NOT run -- 'unmatchedInputs' lists them. Fix the key to the exact
                 "in which case the call is refused until you say which.",
             ),
           inputs: z
-            .record(z.string(), z.string())
+            .record(z.string(), INPUT_VALUE)
             .optional()
             .describe(
               "Parameter values keyed by the exact 'title', 'code' or 'field' number " +
-                "from the first call's inputFields — any of the three works. Omit to " +
-                "discover the parameters without running. A key matching none of them " +
-                "refuses the whole run rather than silently using defaults.",
+                "from the first call's inputFields — any of the three works. A plain " +
+                "string means 'equals'; {value, operator, value2} uses an operator from " +
+                "the step's 'operators' list, which is the only way to express a range. " +
+                "Omit this argument entirely to discover the parameters without running. " +
+                "A key matching no parameter refuses the whole run rather than silently " +
+                "using defaults.",
             ),
         },
       },
       handler(
         "run_program",
-        async (args: { name: string; type?: "P" | "R"; inputs?: Record<string, string> }) => {
+        async (args: { name: string; type?: "P" | "R"; inputs?: Record<string, InputValue> }) => {
           const err = ctx.programs.configError;
           if (err) return { available: false, reason: err };
 
@@ -1016,6 +1047,10 @@ Unlike run_program, nothing is decided here. The reply's 'step' says what Priori
 is waiting for and 'step.next' says exactly which continue_program action answers
 it:
   input      parameters wanted        -> continue{input: {...}}
+             'fields' carries each parameter's help, type, format, maxLength,
+             defaultValue and lookup; 'dialog.text' says what the program does;
+             'operators' lists the comparisons available. Relay those to the
+             user rather than paraphrasing -- they are Priority's own words.
   choose     a choice between options -> ask the USER, then continue{choose: index}
   message    Priority said something  -> relay it; continue{acknowledge: true} or {cancel: true}
   askprint   output is ready          -> continue{output: {format: 'HTML' | 'PDF'}}
@@ -1066,7 +1101,7 @@ without touching the program. 'choose' takes the 1-based 'index' from
           session: z.string().describe("The 'session' id from start_program."),
           action: z
             .object({
-              input: z.record(z.string(), z.string()).optional(),
+              input: z.record(z.string(), INPUT_VALUE).optional(),
               choose: z.number().int().positive().optional(),
               acknowledge: z.literal(true).optional(),
               output: z.object({ format: z.enum(["HTML", "PDF"]).optional() }).optional(),

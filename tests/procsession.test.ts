@@ -46,10 +46,38 @@ function scriptedProgram(log: string[], opts: { withMessage?: boolean } = {}) {
   };
   const input: Step = {
     type: "inputFields",
-    input: { EditFields: [{ field: 1, title: "Form Name", mandatory: true }] },
+    // Shaped like a real reply, measured 2026-09-03 on FORMTRIGREP: a remembered
+    // value AND a remembered operator, per-field help, a lookup, and the dialog.
+    input: {
+      title: "Parameter Input",
+      text: "This report displays the contents of row and form triggers.",
+      Operators: [{ op: 0, name: "= " }, { op: 5, name: "<>" }, { op: 6, name: "- " }],
+      EditFields: [
+        {
+          field: 1,
+          title: "Form Name",
+          mandatory: 1,
+          helpstring: "\nSpecify the name of the form(s).",
+          code: "Str",
+          type: "text",
+          value: "ORDERS",
+          value1: "",
+          operator: 5,
+          maxlength: 60,
+          haszoom: 1,
+          zoom: "Search",
+          formName: "EXEC",
+          columnName: "ENAME",
+          ispassword: 0,
+          readonly: 0,
+        },
+        { field: 2, title: "Secret", mandatory: 0, ispassword: 1, value: "hunter2", code: "Str", type: "text" },
+      ],
+    },
     proc: {
-      inputFields: async (_n: number, payload: { EditFields: { value: string }[] }) => (
-        log.push(`inputFields:${payload.EditFields[0]?.value}`), opts.withMessage ? message : choose
+      inputFields: async (_n: number, payload: { EditFields: { field: number; op: number; value: string; value2: string }[] }) => (
+        log.push(payload.EditFields.map((e) => `f${e.field}:op${e.op}:${e.value}${e.value2 ? `..${e.value2}` : ""}`).join(",")),
+        opts.withMessage ? message : choose
       ),
       cancel: async () => (log.push("cancel"), undefined),
     },
@@ -97,7 +125,22 @@ console.log("\n2. A session hands each step back and answers it");
   if (refused) ok("answering an input step with 'choose' is refused without touching the program");
   else bad("a wrong action was accepted");
 
+  const f1 = s1.step.fields?.[0];
+  if (f1?.help === "Specify the name of the form(s)." && f1.defaultValue === "ORDERS" && f1.lookup === "EXEC.ENAME" && f1.maxLength === 60) {
+    ok("the field carries help, defaultValue, lookup and maxLength");
+  } else bad(`field 1: ${JSON.stringify(f1)}`);
+  const secret = s1.step.fields?.[1];
+  if (secret?.isPassword === true && secret.defaultValue === undefined) ok("a password field is flagged and its value is NOT echoed");
+  else bad(`password field: ${JSON.stringify(secret)}`);
+  if (s1.step.dialog?.text?.startsWith("This report displays") && s1.step.operators?.length === 3) {
+    ok("the dialog text and the operator list come through");
+  } else bad(`dialog=${JSON.stringify(s1.step.dialog)} operators=${JSON.stringify(s1.step.operators)}`);
+
   const s2 = await runner.continue(s1.session, { input: { "Form Name": "ORDERS" } });
+  if (log.some((l) => l.includes("f1:op0:ORDERS"))) ok("a plain string sends operator 0 (=), not the remembered 5");
+  else bad(`payload: ${log.join(" > ")}`);
+  if (log.some((l) => /f2:op0:hunter2/.test(l))) ok("an untouched field keeps its remembered value");
+  else bad(`untouched field was blanked: ${log.join(" > ")}`);
   if (s2.step.kind === "message" && /take a while/.test(s2.step.message ?? "")) ok("input -> message (a warning the user must see)");
   else bad(`after input: ${JSON.stringify(s2.step).slice(0, 200)}`);
 

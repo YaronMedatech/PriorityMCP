@@ -67,17 +67,74 @@ export interface CatalogEntry {
   notes?: string;
 }
 
+/**
+ * One parameter a program is waiting for, as Priority describes it.
+ *
+ * Everything here comes from the server; none of it is inferred. An earlier
+ * version forwarded only the id, the title and the mandatory flag, and threw the
+ * rest away -- which meant the model could not tell the user what a parameter
+ * MEANS (`help`), what it already contains (`defaultValue`), how a date must be
+ * written (`format`), or where valid values come from (`lookup`). All of that is
+ * in the reply Priority already sends.
+ */
 export interface InputField {
+  /** Field id. What `inputs` can be keyed by, alongside the title and the code. */
   field: number;
+  /** The label a Priority user sees, e.g. 'Form Name'. */
   title: string;
+  /** Priority's own explanation of this parameter, in prose. */
+  help?: string;
+  /** Internal type code, e.g. 'Str'. */
   code?: string;
+  /** Value type, e.g. 'text', 'date'. */
+  type?: string;
+  /** For a date, the format the value must be written in, e.g. 'DD/MM/YY'. */
+  format?: string;
   mandatory: boolean;
+  /** The value already in the field -- Priority remembers the previous run. */
+  defaultValue?: string;
+  /** Second value, when the operator is a range. */
+  defaultValue2?: string;
+  maxLength?: number;
+  /** Must be filled from a lookup rather than typed. */
+  readOnly?: boolean;
+  /** The operator cannot be changed for this field. */
+  operatorFixed?: boolean;
+  /** Operator id currently set. */
+  defaultOperator?: number;
+  /** Never echo a value for this field, and never put one in a reply. */
+  isPassword?: boolean;
+  /**
+   * Where valid values come from, when Priority says the field has a lookup:
+   * `EXEC.ENAME` means the value is a row of the EXEC screen. That is queryable
+   * with the read tools, which is how a model finds a legal value instead of
+   * guessing one.
+   */
+  lookup?: string;
 }
 
-/** A choice the program offers. `index` is what continue{choose} takes. */
+/** A comparison a parameter can use, from Priority's own list. */
+export interface OperatorChoice {
+  op: number;
+  name: string;
+}
+
+/** The dialog Priority would show a user, around the fields. */
+export interface InputDialog {
+  title?: string;
+  /** What the program does, in Priority's words. Often the best description there is. */
+  text?: string;
+}
+
+/** A choice the program offers. `id` is what continue{choose} takes. */
 export interface ChoiceOption {
+  /** Priority's own option id. Pass THIS to continue{choose}. */
+  id: number;
+  /** Position in the list, 1-based, for a caller that only sees the order. */
   index: number;
   label: string;
+  /** Priority's explanation of this option, when it gives one. */
+  help?: string;
 }
 
 export interface ProgramRunResult {
@@ -94,6 +151,10 @@ export interface ProgramRunResult {
   messages: string[];
   /** Parameters the program is waiting for, with their Hebrew titles. */
   inputFields?: InputField[];
+  /** The dialog Priority would show around them. */
+  dialog?: InputDialog;
+  /** The comparisons those parameters may use. */
+  operators?: OperatorChoice[];
   /** Present with `needs_choice`: the program stopped at a choice this call will not make. */
   options?: ChoiceOption[];
   /**
@@ -124,6 +185,10 @@ export interface SessionStep {
   kind: StepKind;
   /** `input`: the parameters wanted. Answer with continue{input}. */
   fields?: InputField[];
+  /** `input`: the dialog around them -- often the best description of the program. */
+  dialog?: InputDialog;
+  /** `input`: the comparisons a parameter may use, for ranges and negation. */
+  operators?: OperatorChoice[];
   /** `choose`: the options offered. Answer with continue{choose: index}. */
   options?: ChoiceOption[];
   /** `message`: what Priority said. Answer with continue{acknowledge: true}. */
@@ -151,8 +216,15 @@ export interface SessionReply {
   steps: number;
 }
 
+/**
+ * A value for one parameter. A bare string means "equals this"; the object form
+ * adds Priority's operator (from `operators` in the step) and a second value for
+ * a range, which is the only way to express "between these two dates".
+ */
+export type InputValue = string | { value: string; operator?: number; value2?: string };
+
 export type SessionAction = {
-  input?: Record<string, string>;
+  input?: Record<string, InputValue>;
   choose?: number;
   acknowledge?: true;
   output?: { format?: "HTML" | "PDF" };
@@ -319,7 +391,7 @@ export class ProgramRunner {
   async run(
     name: string,
     type: "P" | "R",
-    inputs?: Record<string, string>,
+    inputs?: Record<string, InputValue>,
     opts: { keepHtml?: boolean } = {},
   ): Promise<ProgramRunResult> {
     return this.drive(name, type, inputs, false, opts.keepHtml === true);
@@ -328,7 +400,7 @@ export class ProgramRunner {
   private async drive(
     name: string,
     type: "P" | "R",
-    inputs: Record<string, string> | undefined,
+    inputs: Record<string, InputValue> | undefined,
     probeOnly: boolean,
     keepHtml: boolean,
   ): Promise<ProgramRunResult> {
@@ -367,6 +439,10 @@ export class ProgramRunner {
       if (kind === "inputFields") {
         const fields = step.input?.EditFields ?? [];
         result.inputFields = describeFields(fields);
+        const dialog = describeDialog(step.input);
+        if (dialog) result.dialog = dialog;
+        const ops = describeOperators((step.input as Record<string, unknown> | undefined)?.["Operators"]);
+        if (ops.length) result.operators = ops;
 
         if (probeOnly || !inputs) {
           // The program exists and is waiting for parameters. Report them rather
@@ -532,11 +608,17 @@ export class ProgramRunner {
       sess.step = await proc?.inputFields?.(1, { EditFields: editPayload(fields, action.input) });
     } else if (action.choose !== undefined) {
       if (current !== "inputOptions") mismatch("choose");
-      const n = describeOptions(sess.step?.input?.Options ?? []).length;
-      if (!Number.isInteger(action.choose) || action.choose < 1 || (n && action.choose > n)) {
-        throw new CallerError(`choose must be an option index from 1 to ${n || "?"}; got ${action.choose}.`);
+      const offered = describeOptions(sess.step?.input?.Options ?? []);
+      const picked =
+        offered.find((o) => o.id === action.choose) ?? offered.find((o) => o.index === action.choose);
+      if (!picked) {
+        throw new CallerError(
+          "choose must be one of the option ids in the step: " +
+            (offered.map((o) => `${o.id} (${o.label})`).join(", ") || "none were offered") +
+            `. Got ${action.choose}.`,
+        );
       }
-      sess.step = await proc?.inputOptions?.(1, action.choose);
+      sess.step = await proc?.inputOptions?.(1, picked.id);
     } else if (action.acknowledge) {
       if (current !== "message") mismatch("acknowledge");
       sess.step = await proc?.message?.(1);
@@ -601,9 +683,13 @@ export class ProgramRunner {
         });
       }
       if (kind === "inputFields") {
+        const dialog = describeDialog(sess.step.input);
+        const ops = describeOperators((sess.step.input as Record<string, unknown> | undefined)?.["Operators"]);
         return this.reply(sess, {
           kind: "input",
           fields: describeFields(sess.step.input?.EditFields ?? []),
+          ...(dialog ? { dialog } : {}),
+          ...(ops.length ? { operators: ops } : {}),
           messages: sess.messages,
           next:
             "The program wants parameters. Ask the user for any you do not have, then " +
@@ -724,12 +810,70 @@ export class ProgramRunner {
 // -- helpers -----------------------------------------------------------------
 
 function describeFields(fields: EditField[]): InputField[] {
-  return fields.map((f) => ({
-    field: Number(f.field ?? 0),
-    title: String(f.title ?? ""),
-    ...(f.code ? { code: String(f.code) } : {}),
-    mandatory: Boolean(f.mandatory),
-  }));
+  return fields.map((f) => {
+    const r = f as Record<string, unknown>;
+    const str = (k: string): string | undefined => {
+      const v = r[k];
+      return typeof v === "string" && v.trim() ? v.trim() : undefined;
+    };
+    const num = (k: string): number | undefined => (typeof r[k] === "number" ? (r[k] as number) : undefined);
+    const flag = (k: string): boolean => r[k] === 1 || r[k] === true;
+    const out: InputField = {
+      field: Number(f.field ?? 0),
+      title: String(f.title ?? ""),
+      mandatory: Boolean(f.mandatory),
+    };
+    const help = str("helpstring");
+    if (help) out.help = help;
+    const code = str("code");
+    if (code) out.code = code;
+    const type = str("type");
+    if (type) out.type = type;
+    const format = str("format");
+    if (format) out.format = format;
+    // A password default must never be echoed: it would put the secret into the
+    // conversation, the transcript and this server's own tool log.
+    if (flag("ispassword")) {
+      out.isPassword = true;
+    } else {
+      const v = str("value");
+      if (v) out.defaultValue = v;
+      const v2 = str("value1");
+      if (v2) out.defaultValue2 = v2;
+    }
+    const max = num("maxlength");
+    if (max) out.maxLength = max;
+    if (flag("readonly")) out.readOnly = true;
+    if (flag("readonlyoperator")) out.operatorFixed = true;
+    const op = num("operator");
+    if (op) out.defaultOperator = op;
+    // A lookup is only useful when Priority names both sides of it.
+    const form = str("formName");
+    const column = str("columnName");
+    if (form && column && (flag("haszoom") || str("zoom"))) out.lookup = form + "." + column;
+    return out;
+  });
+}
+
+/** Priority's operator list for an input dialog. 0 is '=', and one of them is a range. */
+function describeOperators(raw: unknown): OperatorChoice[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((o) => {
+      const r = (o ?? {}) as Record<string, unknown>;
+      const name = String(r["name"] ?? r["title"] ?? "").trim();
+      return { op: Number(r["op"] ?? 0), name };
+    })
+    .filter((o) => o.name !== "");
+}
+
+/** The dialog title and description around an input step. */
+function describeDialog(input: unknown): InputDialog | undefined {
+  const r = (input ?? {}) as Record<string, unknown>;
+  const title = typeof r["title"] === "string" ? r["title"].trim() : "";
+  const text = typeof r["text"] === "string" ? r["text"].trim() : "";
+  if (!title && !text) return undefined;
+  return { ...(title ? { title } : {}), ...(text ? { text } : {}) };
 }
 
 /**
@@ -740,12 +884,17 @@ function describeFields(fields: EditField[]): InputField[] {
 function describeOptions(options: unknown[]): ChoiceOption[] {
   return options.map((o, i) => {
     const r = (o ?? {}) as Record<string, unknown>;
-    const label = r["title"] ?? r["text"] ?? r["name"] ?? r["value"] ?? (typeof o === "string" ? o : JSON.stringify(o));
-    return { index: i + 1, label: String(label) };
+    const label = r["name"] ?? r["title"] ?? r["text"] ?? r["value"] ?? (typeof o === "string" ? o : JSON.stringify(o));
+    // `field` is Priority's own option id and is what inputOptions() takes. It is
+    // usually the position in the list, but nothing promises that, so both are
+    // reported and the id is what gets sent.
+    const id = typeof r["field"] === "number" ? (r["field"] as number) : i + 1;
+    const help = typeof r["help"] === "string" && r["help"].trim() ? r["help"].trim() : undefined;
+    return { id, index: i + 1, label: String(label), ...(help ? { help } : {}) };
   });
 }
 
-function unmatchedKeys(fields: EditField[], inputs: Record<string, string>): string[] {
+function unmatchedKeys(fields: EditField[], inputs: Record<string, InputValue>): string[] {
   const accepted = new Set<string>();
   for (const f of fields) {
     for (const k of [f.title, f.code, f.field]) {
@@ -755,15 +904,45 @@ function unmatchedKeys(fields: EditField[], inputs: Record<string, string>): str
   return Object.keys(inputs).filter((k) => !accepted.has(k));
 }
 
-/** Match supplied values by Hebrew title, by code, or by field number. */
-function editPayload(fields: EditField[], inputs: Record<string, string>) {
-  return fields.map((f) => ({
-    field: Number(f.field ?? 0),
-    op: 0,
-    value: inputs[String(f.title ?? "")] ?? inputs[String(f.code ?? "")] ?? inputs[String(f.field ?? "")] ?? "",
-    op2: 0,
-    value2: "",
-  }));
+/**
+ * Match supplied values by title, by code, or by field number, and build the
+ * payload Priority expects.
+ *
+ * A field the caller did not mention keeps the value Priority already has rather
+ * than being blanked. Sending "" for an untouched parameter is not neutral: it
+ * throws away the default the server just offered, which for a filter means "no
+ * filter at all" and for a mandatory field fails the run on a value the caller
+ * never saw. The operator is preserved the same way.
+ */
+function editPayload(fields: EditField[], inputs: Record<string, InputValue>) {
+  return fields.map((f) => {
+    const r = f as Record<string, unknown>;
+    const supplied =
+      inputs[String(f.title ?? "")] ?? inputs[String(f.code ?? "")] ?? inputs[String(f.field ?? "")];
+    const currentOp = Number(r["operator"] ?? 0);
+    if (supplied === undefined) {
+      return {
+        field: Number(f.field ?? 0),
+        op: currentOp,
+        value: typeof r["value"] === "string" ? r["value"] : "",
+        op2: 0,
+        value2: typeof r["value1"] === "string" ? r["value1"] : "",
+      };
+    }
+    // A supplied value states the parameter, so it also states the comparison:
+    // operator 0 ('='), NOT the one left over from the previous run. Inheriting
+    // currentOp here was measured turning `{"Trigger Name": "POST-INSERT"}` into
+    // `Trigger Name <>'POST-INSERT'` because an earlier run had used '<>' -- the
+    // caller asked for a value and silently got its negation.
+    const v = typeof supplied === "string" ? { value: supplied } : supplied;
+    return {
+      field: Number(f.field ?? 0),
+      op: Number(v.operator ?? 0),
+      value: v.value,
+      op2: 0,
+      value2: v.value2 ?? "",
+    };
+  });
 }
 
 function outputOf(sess: LiveSession): Pick<SessionStep, "output" | "truncated" | "urls"> {
