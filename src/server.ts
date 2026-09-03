@@ -1139,7 +1139,11 @@ it:
              user rather than paraphrasing -- they are Priority's own words.
   choose     a choice between options -> ask the USER, then continue{choose: index}
   message    Priority said something  -> relay it; continue{acknowledge: true} or {cancel: true}
-  askprint   output is ready          -> continue{output: {format: 'HTML' | 'PDF'}}
+  askprint   output is ready          -> continue{output: {}} for Priority's default,
+             or {format:<id>} from the step's own 'formats' list (ids and titles
+             come from Priority, so show the titles to the user). When
+             'step.document' is true add as:'pdf'|'word'|'html' and
+             signature:true; only 'html' returns readable text here
   displayurl still working            -> continue{poll: true}
   end        finished; 'output' holds the report text, 'urls' any file links
 
@@ -1193,7 +1197,26 @@ without touching the program. 'choose' takes the 1-based 'index' from
               input: z.record(z.string(), INPUT_VALUE).optional(),
               choose: z.number().int().positive().optional(),
               acknowledge: z.literal(true).optional(),
-              output: z.object({ format: z.enum(["HTML", "PDF"]).optional() }).optional(),
+              output: z
+                .object({
+                  format: z
+                    .number()
+                    .int()
+                    .optional()
+                    .describe("A format id from the step's 'formats'. Omit for Priority's default."),
+                  as: z
+                    .enum(["pdf", "word", "html"])
+                    .optional()
+                    .describe(
+                      "DOCUMENT steps only (step.document is true): the container. Only 'html' " +
+                        "comes back as readable text; pdf and word arrive as a file.",
+                    ),
+                  signature: z
+                    .boolean()
+                    .optional()
+                    .describe("DOCUMENT steps only: add the user's signature. PDF and Word only."),
+                })
+                .optional(),
               poll: z.literal(true).optional(),
               cancel: z.literal(true).optional(),
             })

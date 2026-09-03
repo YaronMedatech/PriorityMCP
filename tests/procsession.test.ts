@@ -28,7 +28,14 @@ function scriptedProgram(log: string[], opts: { withMessage?: boolean } = {}) {
   };
   const report: Step = {
     type: "reportOptions",
-    proc: { reportOptions: async (_a: number, fmt: string) => (log.push(`reportOptions:${fmt}`), display) },
+    // Priority's real shape: ids, titles, and its own preselection.
+    input: {
+      formats: [
+        { format: 1, selected: 0, title: "Standard", template: 0 },
+        { format: -101, selected: 1, title: "Detailed", template: 0 },
+      ],
+    },
+    proc: { reportOptions: async (_a: number, fmt: number) => (log.push(`reportOptions:${fmt}`), display) },
   };
   const choose: Step = {
     type: "inputOptions",
@@ -158,12 +165,31 @@ console.log("\n2. A session hands each step back and answers it");
   else bad("choose: 7 was accepted for 2 options");
 
   const s4 = await runner.continue(s3.session, { choose: 2 });
-  if (s4.step.kind === "askprint" && s4.step.formats?.includes("PDF")) ok("choose -> askprint");
-  else bad(`after choose: ${JSON.stringify(s4.step).slice(0, 200)}`);
+  if (s4.step.kind === "askprint" && s4.step.formats?.length === 2 && s4.step.formats[1]?.title === "Detailed") {
+    ok("choose -> askprint, carrying PRIORITY's own format list with titles");
+  } else bad(`after choose: ${JSON.stringify(s4.step).slice(0, 250)}`);
+  let badFormat = false;
+  try {
+    await runner.continue(s4.session, { output: { format: 999 } });
+  } catch {
+    badFormat = true;
+  }
+  if (badFormat) ok("a format id the program does not offer is refused");
+  else bad("format 999 was accepted");
+  let notADoc = false;
+  try {
+    await runner.continue(s4.session, { output: { signature: true } });
+  } catch {
+    notADoc = true;
+  }
+  if (notADoc) ok("signature on a REPORT step is refused -- it is a document flag");
+  else bad("signature was accepted on a report step");
   if (log.includes("inputOptions:2")) ok("the USER's choice (2) reached the program");
   else bad(`choice not forwarded: ${log.join(" > ")}`);
 
-  const s5 = await runner.continue(s4.session, { output: { format: "HTML" } });
+  const s5 = await runner.continue(s4.session, { output: {} });
+  if (log.some((l) => l === "reportOptions:-101")) ok("output:{} takes Priority's PRESELECTED format (-101), not a guess");
+  else bad(`format sent: ${log.filter((l) => l.startsWith("reportOptions")).join(",")}`);
   if (s5.done && s5.step.kind === "end" && /ORDERS\tPOST-INSERT|Form\tORDERS/.test(s5.step.output ?? "")) {
     ok("output -> end, with the report flattened to tab-separated text");
   } else bad(`after output: ${JSON.stringify(s5.step).slice(0, 300)}`);

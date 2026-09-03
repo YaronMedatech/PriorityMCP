@@ -39,7 +39,7 @@ let reply = await runner.continue(first.session, { input: { [first.step.fields?.
 let guard = 0;
 while (!reply.done && guard++ < 10) {
   console.log(`  step: ${reply.step.kind}`);
-  if (reply.step.kind === "askprint") reply = await runner.continue(reply.session, { output: { format: "HTML" } });
+  if (reply.step.kind === "askprint") reply = await runner.continue(reply.session, { output: {} });
   else if (reply.step.kind === "message") reply = await runner.continue(reply.session, { acknowledge: true });
   else if (reply.step.kind === "displayurl") reply = await runner.continue(reply.session, { poll: true });
   else if (reply.step.kind === "choose") {

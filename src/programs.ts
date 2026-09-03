@@ -52,12 +52,43 @@ interface EditField {
 interface ProcMethods {
   inputFields?: (n: number, payload: unknown) => Promise<ProcStep>;
   inputOptions?: (a: number, b: number) => Promise<ProcStep>;
-  reportOptions?: (a: number, format: string, opts: unknown) => Promise<ProcStep>;
-  documentOptions?: (a: number, format: string, opts: unknown) => Promise<ProcStep>;
+  // The SDK's real signatures, from its own .d.ts: the format is a NUMBER from
+  // the step's own list, and there is no options object -- the third argument of
+  // reportOptions is a success CALLBACK. This server used to call
+  // reportOptions(1, "HTML", {}), passing a string where a format id belongs and
+  // an object where a callback belongs. It happened to render, because the SDK
+  // fell back to the default format, but nothing about it was right.
+  reportOptions?: (ok: number, selectedFormat: number) => Promise<ProcStep>;
+  documentOptions?: (ok: number, selectedFormat: number, pdf: number | DocumentFormat) => Promise<ProcStep>;
   message?: (n: number) => Promise<ProcStep>;
   inputHelp?: (n: number) => Promise<ProcStep>;
   continueProc?: () => Promise<ProcStep>;
   cancel?: () => Promise<unknown>;
+}
+
+/**
+ * The document flags `documentOptions` accepts instead of a bare pdf number.
+ *
+ * `signature` only takes effect for PDF and Word, per the SDK's own note.
+ * There is deliberately no `automail`: Priority's own MCP documents a
+ * `mode: 'automail'` for mailing a report, and the Web SDK this server runs on
+ * has no such parameter anywhere. Offering one would be inventing it.
+ */
+interface DocumentFormat {
+  pdf: number;
+  word: number;
+  signature: number;
+}
+
+/** One output format Priority offers for this program. */
+export interface OutputFormat {
+  /** Format id. This is what `output.format` takes. */
+  id: number;
+  title: string;
+  /** Priority's own default for this program. */
+  selected?: true;
+  /** Word template id, when the format is a Word template. */
+  template?: number;
 }
 
 export interface CatalogEntry {
@@ -196,8 +227,14 @@ export interface SessionStep {
   /** `message`: what Priority said. Answer with continue{acknowledge: true}. */
   message?: string;
   messageType?: string;
-  /** `askprint`: output formats this server can ask for. Answer with continue{output}. */
-  formats?: string[];
+  /**
+   * `askprint`: the formats PRIORITY offers for this program, with their ids and
+   * titles. Previously this was a hardcoded ['HTML','PDF'] that ignored the list
+   * the step actually carries.
+   */
+  formats?: OutputFormat[];
+  /** `askprint`: true when this step is a DOCUMENT, so pdf/word/signature apply. */
+  document?: true;
   /** `displayurl` / `end`: report output as text, plus any URLs Priority handed back. */
   output?: string;
   truncated?: boolean;
@@ -229,7 +266,14 @@ export type SessionAction = {
   input?: Record<string, InputValue>;
   choose?: number;
   acknowledge?: true;
-  output?: { format?: "HTML" | "PDF" };
+  output?: {
+    /** A format id from the step's 'formats'. Omit to take Priority's default. */
+    format?: number;
+    /** Document steps only: produce a PDF (default), Word, or HTML. */
+    as?: "pdf" | "word" | "html";
+    /** Document steps only: add the user's signature. PDF and Word only. */
+    signature?: boolean;
+  };
   poll?: true;
   cancel?: true;
 };
@@ -511,14 +555,17 @@ export class ProgramRunner {
         await proc?.cancel?.().catch(() => undefined);
         return finish(result, html, keepHtml);
       }
-      if (kind === "reportOptions") {
-        // HTML is the only format worth asking for here: it is what carries the
-        // report body back inline as a data URI.
-        step = await proc?.reportOptions?.(1, "HTML", {});
-        continue;
-      }
-      if (kind === "documentOptions") {
-        step = await proc?.documentOptions?.(1, "HTML", {});
+      if (kind === "reportOptions" || kind === "documentOptions") {
+        // Take Priority's own default format. The one-call path has no caller to
+        // ask, and picking a format is a decision -- the session path offers the
+        // list instead. HTML is requested for a document because that is what
+        // comes back inline as text; a PDF would arrive as bytes this reply
+        // cannot carry.
+        const chosen = defaultFormat(step.input);
+        step =
+          kind === "reportOptions"
+            ? await proc?.reportOptions?.(1, chosen)
+            : await proc?.documentOptions?.(1, chosen, 2);
         continue;
       }
       if (kind === "inputHelp") {
@@ -643,11 +690,33 @@ export class ProgramRunner {
       sess.step = await proc?.message?.(1);
     } else if (action.output) {
       if (current !== "reportOptions" && current !== "documentOptions") mismatch("output");
-      const format = action.output.format ?? "HTML";
-      sess.step =
-        current === "reportOptions"
-          ? await proc?.reportOptions?.(1, format, {})
-          : await proc?.documentOptions?.(1, format, {});
+      const offered = describeFormats(sess.step?.input);
+      const wanted = action.output.format;
+      if (wanted !== undefined && offered.length && !offered.some((f) => f.id === wanted)) {
+        throw new CallerError(
+          `format ${wanted} is not offered for this program. The ids are: ` +
+            `${offered.map((f) => `${f.id} (${f.title})`).join(", ")}. Omit 'format' for the default.`,
+        );
+      }
+      const chosen = wanted ?? defaultFormat(sess.step?.input);
+      if (current === "reportOptions") {
+        if (action.output.as === "word" || action.output.signature) {
+          throw new CallerError(
+            `This is a report step, not a document: 'as' and 'signature' apply only to ` +
+              `documents. Send output:{} or output:{format:<id>}.`,
+          );
+        }
+        sess.step = await proc?.reportOptions?.(1, chosen);
+      } else {
+        // documentFormat, per the SDK: pdf/word pick the container and signature
+        // only takes effect for those two.
+        const as = action.output.as ?? "pdf";
+        sess.step = await proc?.documentOptions?.(1, chosen, {
+          pdf: as === "pdf" ? 1 : 0,
+          word: as === "word" ? 1 : 0,
+          signature: action.output.signature ? 1 : 0,
+        });
+      }
     } else if (action.poll) {
       sess.step = await proc?.continueProc?.();
     }
@@ -726,13 +795,22 @@ export class ProgramRunner {
         });
       }
       if (kind === "reportOptions" || kind === "documentOptions") {
+        const formats = describeFormats(sess.step.input);
+        const isDoc = kind === "documentOptions";
         return this.reply(sess, {
           kind: "askprint",
-          formats: ["HTML", "PDF"],
+          ...(formats.length ? { formats } : {}),
+          ...(isDoc ? { document: true as const } : {}),
           messages: sess.messages,
           next:
-            "The output is ready to be produced. Send continue{output: {format: 'HTML'}} " +
-            "for text you can read here, or 'PDF' for a file URL when Priority provides one.",
+            `The output is ready. Send continue{output:{}} to take Priority's default format` +
+            (formats.length
+              ? `, or output:{format:<id>} to pick one of ${formats.length} -- show the user their titles.`
+              : `.`) +
+            (isDoc
+              ? ` This is a DOCUMENT: add as:'pdf'|'word'|'html' and signature:true if wanted. ` +
+                `Only 'html' comes back as readable text here; the others arrive as a file.`
+              : ``),
         });
       }
       if (kind === "inputHelp") {
@@ -913,6 +991,33 @@ function describeOperators(raw: unknown): OperatorChoice[] {
       return { op: Number(r["op"] ?? 0), name };
     })
     .filter((o) => o.name !== "");
+}
+
+/**
+ * The formats an output step offers, from the step itself.
+ *
+ * Priority sends `formats: [{format, selected, title, template}]`. This server
+ * used to report a hardcoded ['HTML','PDF'] regardless, so a program with three
+ * real formats looked like it had two, neither of them by its real name.
+ */
+function describeFormats(input: unknown): OutputFormat[] {
+  const raw = (input as Record<string, unknown> | undefined)?.["formats"];
+  if (!Array.isArray(raw)) return [];
+  return raw.map((f) => {
+    const r = (f ?? {}) as Record<string, unknown>;
+    return {
+      id: Number(r["format"] ?? 0),
+      title: String(r["title"] ?? "").trim() || `format ${String(r["format"] ?? "?")}`,
+      ...(r["selected"] === 1 || r["selected"] === true ? { selected: true as const } : {}),
+      ...(typeof r["template"] === "number" && r["template"] ? { template: r["template"] as number } : {}),
+    };
+  });
+}
+
+/** Priority's own preselected format for a step, or its first, or 1. */
+function defaultFormat(input: unknown): number {
+  const formats = describeFormats(input);
+  return formats.find((f) => f.selected)?.id ?? formats[0]?.id ?? 1;
 }
 
 /** Strip Priority's markup from a help string, when it sent any. */
