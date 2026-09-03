@@ -10,6 +10,7 @@ import { Examples, Glossary } from "./glossary.js";
 import { ENTITY_KINDS, fetchColumnHelp, fetchEntityHelpOutcome } from "./help.js";
 import { fetchSkill, listSkills, matchSkills } from "./skills.js";
 import type { SessionAction } from "./programs.js";
+import { loadProgramDenyList, loadProgramPolicy, resolveProgram } from "./programselect.js";
 import {
   aggregateShape,
   describeScreen,
@@ -342,6 +343,36 @@ ${writeRule}
       return new Set();
     }
   };
+
+  // How much of Priority the program tools may reach. Read once at startup: it
+  // decides tool DESCRIPTIONS, which a client caches for the session, so it
+  // could not vary per call even if that were wanted.
+  const programPolicy = loadProgramPolicy();
+  const programDeny = loadProgramDenyList();
+  if (programPolicy === "all") {
+    log(
+      `programs: ALL procedures and reports may be run (PRIORITY_ALLOW_ALL_PROGRAMS)` +
+        `${programDeny.size ? `, except ${[...programDeny].join(", ")}` : " — no deny list set"}`,
+    );
+  } else {
+    log(`programs: only those in the catalog may be run (${runnableNames().size} listed)`);
+  }
+
+  /** The paragraph both program tools open with, so the model reads one rule. */
+  const programScope =
+    programPolicy === "all"
+      ? `SCOPE: any procedure or report in this Priority may be run, not only the
+catalogued ones. That makes YOU responsible for what a program does. Before
+running anything not in list_programs:
+  1. read help{name, type} -- Priority's own description of it;
+  2. tell the user what it is and ask, if it is a procedure (P). A report (R)
+     renders output; a PROCEDURE CAN CHANGE, POST OR DELETE DATA, and there is
+     no undo.
+A reply carrying 'caution' means nothing is documented here about that program.
+Never run a name you inferred; find it with search_screens{kinds:['P','R']}.`
+      : `SCOPE: only the programs in list_programs may be run. A name outside that
+catalog is refused, and the refusal is the answer -- report it rather than
+trying a different name.`;
 
   server.registerTool(
     "search_screens",
@@ -820,28 +851,43 @@ inference about which screens to use.`,
     {
       title: "List runnable Priority programs",
       annotations: { ...READ_ONLY_HINTS, openWorldHint: false },
-      description: `List the Priority programs and reports this server is allowed to run.
-
-Priority provides NO way to enumerate runnable programs -- APPS/APP answer 404 and
-the program-definition screens are closed to the API. So this catalog is the only
-way to learn that a program exists. If what you need is not listed, say so and ask
-the operator to add it to programs.json; do not guess a name and try to run it.
+      description: `The programs and reports the operator has DOCUMENTED, with their notes.
 
 'type' is 'R' for a report (renders output) or 'P' for a procedure (can change
-data). Read 'notes' before running anything.`,
+data). Read 'notes' before running anything -- they record what the titles do not.
+
+Whether this catalog is also the LIMIT of what may be run depends on the server:
+read 'scope' in the reply. When it is not the limit, every procedure and report in
+Priority can be run, and these are simply the ones with guidance attached; find
+the others with search_screens{kinds:['P','R']} and read help{name,type} before
+running them.`,
       inputSchema: {},
     },
     handler("list_programs", async () => {
       const err = ctx.programs.configError;
       if (err) return { available: false, reason: err };
       const catalog = ctx.programs.readCatalog();
+      // Deliberately NOT awaiting the dictionary: this tool reads a local file
+      // and must keep answering when Priority is unreachable. The count is a
+      // nicety, so it is taken only if the dictionary happens to be loaded.
+      const loaded = ctx.dict.stats().programs;
+      const total = loaded > 0 ? String(loaded) : "all";
       return {
         available: true,
         count: catalog.length,
         programs: catalog,
+        scope:
+          programPolicy === "all"
+            ? `ANY of the ${total} procedures and reports in this Priority may be run. ` +
+              `These ${catalog.length} are the documented ones; the rest carry no notes, ` +
+              `so read help{name,type} first and ask the user before running a procedure.` +
+              (programDeny.size ? ` Blocked outright: ${[...programDeny].join(", ")}.` : "")
+            : `ONLY these ${catalog.length} may be run. Priority cannot enumerate runnable ` +
+              `programs over the API, so this list is both the permission and the only way ` +
+              `to learn a program exists. A name outside it is refused; report that rather ` +
+              `than trying another name.`,
         note:
-          "This list is maintained by the operator, not discovered from Priority. " +
-          "A program that is not here cannot be run by this server." +
+          "This list is maintained by the operator, not discovered from Priority." +
           (readOnly
             ? " RUNNING IS DISABLED on this server (read-only mode): these can be " +
               "described but not executed."
@@ -850,6 +896,25 @@ data). Read 'notes' before running anything.`,
     }),
   );
   registered.push("list_programs");
+
+  /**
+   * Resolve a requested program name, loading the dictionary first.
+   *
+   * The dictionary is what makes the 'all' policy safe to offer at all: it holds
+   * every procedure and report EXEC lists, so a typo is caught here instead of
+   * becoming a round trip that answers "No such Tabula Entity" with no hint of
+   * what was meant.
+   */
+  const pickProgram = async (name: string, type?: "P" | "R") => {
+    await ctx.dict.ready();
+    return resolveProgram(name, {
+      policy: programPolicy,
+      deny: programDeny,
+      catalog: ctx.programs.readCatalog(),
+      dict: ctx.dict,
+      ...(type ? { type } : {}),
+    });
+  };
 
   if (readOnly) {
     log("run_program is NOT registered (PRIORITY_READ_ONLY) — this server cannot change Priority data");
@@ -864,7 +929,9 @@ data). Read 'notes' before running anything.`,
           idempotentHint: false,
           openWorldHint: true,
         },
-        description: `Run one of the programs from list_programs, optionally with parameters.
+        description: `Run a Priority procedure (P) or report (R), optionally with parameters.
+
+${programScope}
 
 Call it once WITHOUT inputs first: the reply lists the parameters the program is
 waiting for, each with its Hebrew title, and does not run it. Supply 'inputs'
@@ -885,7 +952,14 @@ start_program + continue_program, where the user makes that choice.
 program was NOT run -- 'unmatchedInputs' lists them. Fix the key to the exact
 'title', 'code' or 'field' from inputFields; do not retry with the same key.`,
         inputSchema: {
-          name: z.string().describe("Program name from list_programs."),
+          name: z.string().describe("Program name. Case-insensitive, unlike screen names."),
+          type: z
+            .enum(["P", "R"])
+            .optional()
+            .describe(
+              "P procedure or R report. Needed only when one name is both — FORMMSG is — " +
+                "in which case the call is refused until you say which.",
+            ),
           inputs: z
             .record(z.string(), z.string())
             .optional()
@@ -897,29 +971,28 @@ program was NOT run -- 'unmatchedInputs' lists them. Fix the key to the exact
             ),
         },
       },
-      handler("run_program", async (args: { name: string; inputs?: Record<string, string> }) => {
-        const err = ctx.programs.configError;
-        if (err) return { available: false, reason: err };
+      handler(
+        "run_program",
+        async (args: { name: string; type?: "P" | "R"; inputs?: Record<string, string> }) => {
+          const err = ctx.programs.configError;
+          if (err) return { available: false, reason: err };
 
-        const entry = ctx.programs.findInCatalog(args.name);
-        if (!entry) {
-          const catalog = ctx.programs.readCatalog();
+          const chosen = await pickProgram(args.name, args.type);
+          if ("refused" in chosen) return chosen;
+
+          const result = args.inputs
+            ? await ctx.programs.run(chosen.name, chosen.type, args.inputs)
+            : await ctx.programs.probe(chosen.name, chosen.type);
           return {
-            refused: true,
-            reason:
-              `'${args.name}' is not in the program catalog, so this server will not run ` +
-              `it: it has no way to know the program's parameters or what running it ` +
-              `would do. Ask the operator to add it to programs.json. Report this ` +
-              `rather than trying a different name.`,
-            available: catalog.map((p) => `${p.name} (${p.type}) — ${p.description}`),
+            ...result,
+            program: chosen.name,
+            title: chosen.title,
+            permittedBy: chosen.source,
+            ...(chosen.catalogEntry ? { catalogEntry: chosen.catalogEntry } : {}),
+            ...(chosen.caution ? { caution: chosen.caution } : {}),
           };
-        }
-
-        const result = args.inputs
-          ? await ctx.programs.run(entry.name, entry.type, args.inputs)
-          : await ctx.programs.probe(entry.name, entry.type);
-        return { ...result, catalogEntry: entry };
-      }),
+        },
+      ),
     );
     registered.push("run_program");
 
@@ -935,7 +1008,9 @@ program was NOT run -- 'unmatchedInputs' lists them. Fix the key to the exact
       {
         title: "Start a Priority program as an interactive session",
         annotations: PROGRAM_HINTS,
-        description: `Start a program from list_programs and stop at the first step that needs a decision.
+        description: `Start a procedure (P) or report (R) and stop at the first step that needs a decision.
+
+${programScope}
 
 Unlike run_program, nothing is decided here. The reply's 'step' says what Priority
 is waiting for and 'step.next' says exactly which continue_program action answers
@@ -951,24 +1026,25 @@ Choices and messages are the user's to make. A session left alone is cancelled
 after 5 minutes. Use run_program instead for a report whose parameters you
 already know and that asks no questions.`,
         inputSchema: {
-          name: z.string().describe("Program name from list_programs."),
+          name: z.string().describe("Program name. Case-insensitive, unlike screen names."),
+          type: z
+            .enum(["P", "R"])
+            .optional()
+            .describe("P procedure or R report. Needed only when one name is both."),
         },
       },
-      handler("start_program", async (args: { name: string }) => {
+      handler("start_program", async (args: { name: string; type?: "P" | "R" }) => {
         const err = ctx.programs.configError;
         if (err) return { available: false, reason: err };
-        const entry = ctx.programs.findInCatalog(args.name);
-        if (!entry) {
-          return {
-            refused: true,
-            reason:
-              `'${args.name}' is not in the program catalog, so this server will not run ` +
-              `it. Ask the operator to add it to programs.json. Report this rather than ` +
-              `trying a different name.`,
-            available: ctx.programs.readCatalog().map((p) => `${p.name} (${p.type}) — ${p.description}`),
-          };
-        }
-        return { ...(await ctx.programs.start(entry.name, entry.type)), catalogEntry: entry };
+        const chosen = await pickProgram(args.name, args.type);
+        if ("refused" in chosen) return chosen;
+        return {
+          ...(await ctx.programs.start(chosen.name, chosen.type)),
+          title: chosen.title,
+          permittedBy: chosen.source,
+          ...(chosen.catalogEntry ? { catalogEntry: chosen.catalogEntry } : {}),
+          ...(chosen.caution ? { caution: chosen.caution } : {}),
+        };
       }),
     );
     registered.push("start_program");

@@ -78,7 +78,7 @@ an outage.
 | `list_companies` | The configured companies with their real names from the `ENVIRONMENT` screen. |
 | `use_company` | Switch the session's company. Changes the data only. |
 | `readiness_report` | Where the glossary, examples and dictionary have gaps. |
-| `list_programs` | The catalog of runnable programs (`programs.json`). |
+| `list_programs` | The documented programs (`programs.json`), and whether that catalog is also the limit of what may be run. |
 | `run_program` | Run one to completion, through the Web SDK. Stops with `needs_choice` rather than picking an option itself. `PRIORITY_READ_ONLY=1` removes it and the two below. |
 | `start_program` / `continue_program` | The same programs as an interactive session: `input`, `choose`, `message`, `askprint`, `displayurl`, `end` — the vocabulary Priority's own MCP uses. Every decision goes back to the user; an idle session is cancelled after 5 minutes. |
 | `list_skills` / `get_skill` | AI skills written inside Priority (`AIWORKFLOWS`, "AI סקילז"), listed and read in full. **Off by default** (`PRIORITY_ENABLE_SKILLS=1`): deferred, and the screen is not API-enabled on the reference installation. |
@@ -141,6 +141,14 @@ see [.env.example](.env.example). The three that decide the shape of a deploymen
 - **`PRIORITY_READ_ONLY`** — `1` removes `run_program`, leaving no way to change
   anything. Discovery and read tools are never gated: without them a model cannot learn
   a screen name and goes back to inferring one, which is the failure above.
+- **`PRIORITY_ALLOW_ALL_PROGRAMS`** — `0` (default) allows only the catalogued programs.
+  `1` allows any of the installation's ~9,200 procedures and reports, with
+  `PRIORITY_PROGRAMS_DENY` as the exception list. Opening it hands the model programs
+  that post, delete and upgrade, so what still holds is worth knowing: an unknown name is
+  refused against the dictionary rather than sent, a name that is both `P` and `R` is
+  refused until the type is given, an uncatalogued program comes back with a `caution`,
+  the first call without inputs only reports parameters, and a choice is never made
+  server-side.
 
 `MCP_AUTH_TOKEN` is required whenever the listener is not loopback-only. The server
 refuses to start without it rather than warning — it holds Priority credentials and
