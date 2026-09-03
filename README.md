@@ -81,7 +81,7 @@ an outage.
 | `list_programs` | The catalog of runnable programs (`programs.json`). |
 | `run_program` | Run one to completion, through the Web SDK. Stops with `needs_choice` rather than picking an option itself. `PRIORITY_READ_ONLY=1` removes it and the two below. |
 | `start_program` / `continue_program` | The same programs as an interactive session: `input`, `choose`, `message`, `askprint`, `displayurl`, `end` — the vocabulary Priority's own MCP uses. Every decision goes back to the user; an idle session is cancelled after 5 minutes. |
-| `list_skills` / `get_skill` | AI skills written inside Priority (`AIWORKFLOWS`, "AI סקילז"), listed and read in full. Reports a closed screen as a permission, not as "no skills". |
+| `list_skills` / `get_skill` | AI skills written inside Priority (`AIWORKFLOWS`, "AI סקילז"), listed and read in full. **Off by default** (`PRIORITY_ENABLE_SKILLS=1`): deferred, and the screen is not API-enabled on the reference installation. |
 
 Clients also receive ~3,100 characters of server-level instructions on `initialize`
 (the discovery order, case sensitivity, never summing currencies, how reversals work).

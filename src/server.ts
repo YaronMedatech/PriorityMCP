@@ -127,6 +127,13 @@ export function buildServer(
   // is the exact failure this server exists to prevent.
   const readOnly = envFlag("PRIORITY_READ_ONLY");
 
+  // Skills authored inside Priority (AIWORKFLOWS). Off by default: the operator
+  // decided on 2026-09-02 not to pursue them for now, and on this installation the
+  // screen is closed to the API anyway. Two tools that always answer "closed"
+  // would cost the model ~1KB of instructions per session and invite calls that
+  // cannot succeed. The code stays; the flag brings it back.
+  const skillsEnabled = envFlag("PRIORITY_ENABLE_SKILLS");
+
   // Stated in the instructions, not just enforced in the registration. A client
   // puts these in its system prompt, and a model told it has a way to act will
   // keep hunting for the tool that provides it.
@@ -387,6 +394,7 @@ name can be a screen, a report AND a procedure (FORMMSG is all three).`,
       // Skills authored in Priority, when the installation lets us read them.
       // Cached for ten minutes including a refusal, so this costs nothing on an
       // installation where the screen is closed.
+      if (!skillsEnabled) return result;
       const skills = matchSkills(await listSkills(ctx.client), String(args.query ?? ""));
       if (!skills.length) return result;
       return {
@@ -743,6 +751,7 @@ entry rather than by changing anything in Priority.`,
     handler("readiness_report", async () => {
       await ctx.dict.ready();
       const report = buildReadiness(ctx.dict, glossary, runnableNames());
+      if (!skillsEnabled) return report;
       const skills = await listSkills(ctx.client);
       return {
         ...report,
@@ -754,6 +763,9 @@ entry rather than by changing anything in Priority.`,
   );
   registered.push("readiness_report");
 
+  if (!skillsEnabled) {
+    log("skills tools are NOT registered (set PRIORITY_ENABLE_SKILLS=1 to expose list_skills / get_skill)");
+  } else {
   server.registerTool(
     "list_skills",
     {
@@ -796,6 +808,7 @@ inference about which screens to use.`,
     handler("get_skill", async (args: { key: Record<string, string | number> }) => fetchSkill(ctx.client, args.key)),
   );
   registered.push("get_skill");
+  }
 
   server.registerTool(
     "list_programs",

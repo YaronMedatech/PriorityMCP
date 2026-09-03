@@ -51,22 +51,25 @@ const { tools } = await client.listTools();
 const names = tools.map((t) => t.name).sort();
 console.log(`   tools: ${names.join(", ")}`);
 
-// Same set the stdio transport exposes -- both share buildServer().
+// Same set the stdio transport exposes -- both share buildServer(). Two flags in
+// .env decide the exact set, so the expectation follows the same .env this test
+// loaded rather than hard-coding one configuration.
+const flag = (name: string) => ["1", "true", "yes"].includes((process.env[name] ?? "").trim().toLowerCase());
 const expected = [
   "aggregate",
   "column_values",
-  "continue_program",
+  ...(flag("PRIORITY_READ_ONLY") ? [] : ["continue_program"]),
   "describe_screen",
-  "get_skill",
+  ...(flag("PRIORITY_ENABLE_SKILLS") ? ["get_skill"] : []),
   "help",
   "list_companies",
   "list_programs",
-  "list_skills",
+  ...(flag("PRIORITY_ENABLE_SKILLS") ? ["list_skills"] : []),
   "query",
   "readiness_report",
-  "run_program",
+  ...(flag("PRIORITY_READ_ONLY") ? [] : ["run_program"]),
   "search_screens",
-  "start_program",
+  ...(flag("PRIORITY_READ_ONLY") ? [] : ["start_program"]),
   "use_company",
 ];
 if (JSON.stringify(names) === JSON.stringify(expected)) {
