@@ -30,24 +30,83 @@ export function loadEnvFile(): void {
 
 loadEnvFile();
 
+/**
+ * Where Priority runs. The two differ in how the Web SDK is reached and in
+ * which identity it accepts, and nowhere else so far.
+ *
+ * Set explicitly with PRIORITY_HOSTING; detected from the OData host name when
+ * unset (*.priority-connect.online is Priority's cloud). Explicit wins, because
+ * this server is configured for several installations and a heuristic that is
+ * right for one host name is a silent wrong guess on the next.
+ */
+export type Hosting = "cloud" | "self-hosted";
+
+export interface HostingInfo {
+  hosting: Hosting;
+  /** Whether .env said so, or the host name was read. */
+  source: "PRIORITY_HOSTING" | "detected";
+  /** One line for the startup log. */
+  detail: string;
+}
+
+const HOSTING_VALUES: Record<string, Hosting> = {
+  cloud: "cloud",
+  saas: "cloud",
+  "self-hosted": "self-hosted",
+  selfhosted: "self-hosted",
+  "on-prem": "self-hosted",
+  onprem: "self-hosted",
+  local: "self-hosted",
+};
+
+export function detectHosting(e: NodeJS.ProcessEnv = process.env): HostingInfo {
+  const raw = (e["PRIORITY_HOSTING"] ?? "").trim().toLowerCase();
+  if (raw) {
+    const hosting = HOSTING_VALUES[raw];
+    if (!hosting) {
+      throw new ConfigError(
+        `PRIORITY_HOSTING is '${e["PRIORITY_HOSTING"]}', which is not a value this server knows. ` +
+          `Use 'cloud' for Priority's cloud (*.priority-connect.online) or 'self-hosted' ` +
+          `for an installation on your own or a partner's servers. Leave it empty to detect ` +
+          `from the OData host name.`,
+      );
+    }
+    return { hosting, source: "PRIORITY_HOSTING", detail: `${hosting} (PRIORITY_HOSTING=${raw})` };
+  }
+  let host = "";
+  try {
+    host = new URL((e["PRIORITY_ODATA_URL"] ?? "").trim()).hostname;
+  } catch {
+    // No usable URL: assume self-hosted, and say so.
+  }
+  const hosting: Hosting = /\.priority-connect\.online$/i.test(host) ? "cloud" : "self-hosted";
+  return {
+    hosting,
+    source: "detected",
+    detail: `${hosting} (detected from ${host || "no OData URL"}; pin it with PRIORITY_HOSTING=${hosting})`,
+  };
+}
+
 export interface WebSdkConfig {
   /**
-   * The Web SDK's service URL. On a self-hosted Priority this is the HOST ROOT
-   * (`https://host/`; the SDK appends `/wcf/wcf/Service.svc`). On Priority's
-   * cloud it is the documented `https://<host>/wcf/service.svc` -- one `wcf`,
-   * ending in `.svc` so the SDK appends nothing. Never the OData path.
+   * The Web SDK's service URL. Self-hosted: the HOST ROOT (`https://host/`; the
+   * SDK appends `/wcf/wcf/Service.svc`). Cloud: the documented
+   * `https://<host>/wcf/service.svc` -- one `wcf`, ending in `.svc` so the SDK
+   * appends nothing. Never the OData path.
    */
   url: string;
   company: string;
   /**
    * Either a real Priority user, or a PAT sent as `username=<token>,
-   * password='PAT'` -- documented since Priority 19.1 and measured working on
-   * the cloud on 2026-09-02, where the named user was refused.
+   * password='PAT'` (documented since Priority 19.1). Which is tried first
+   * depends on hosting: the cloud refused the named user and accepted the PAT
+   * (measured 2026-09-02); older self-hosted versions are the other way round.
    */
   username: string;
   password: string;
   /** Which of the two the identity is, for logs. */
   identity: "pat" | "user";
+  hosting: Hosting;
   tabulaini: string;
   /** Absolute path to the runnable-program catalog. */
   catalogPath: string;
@@ -344,25 +403,27 @@ export function loadWebSdkConfig(company_?: string): WebSdkConfig | { error: str
   // the SDK one to the OData path produces a login failure that points nowhere.
   // Explicit values still win, for an install where the two really do differ.
   const derived = deriveFromODataUrl(env("PRIORITY_ODATA_URL"));
+  const { hosting } = detectHosting();
 
-  const url = env("PRIORITY_HOST_URL") ?? (derived?.host ? webSdkUrlFor(derived.host) : undefined);
+  const url = env("PRIORITY_HOST_URL") ?? (derived?.host ? webSdkUrlFor(derived.host, hosting) : undefined);
   // The session's company wins over both the setting and the URL. A program run
   // against a different company from the one being read would act on data the
   // caller never looked at.
   const company =
     company_ ?? env("PRIORITY_COMPANY") ?? (derived?.company || undefined) ?? defaultEnvironment() ?? undefined;
 
-  // PAT first. It is the identity OData already uses, so both channels act as
-  // the same user, and on the cloud it is the one that logs in at all: measured
-  // 2026-09-02, the named user in .env was refused where the token succeeded.
+  // Which identity first depends on where Priority runs. Cloud: the PAT -- it is
+  // what OData uses, so both channels act as one user, and measured 2026-09-02
+  // the named user was refused where the token logged in. Self-hosted: the named
+  // user -- the SDK there historically wanted a real user, and PAT support
+  // arrived only in 19.1. Whichever is not first is still the fallback, so a
+  // .env that carries both works on either kind of installation.
   const token = env("PRIORITY_API_TOKEN");
   const user = env("PRIORITY_USER");
   const pass = env("PRIORITY_PASS");
-  const identity: { username: string; password: string; identity: "pat" | "user" } | undefined = token
-    ? { username: token, password: "PAT", identity: "pat" }
-    : user && pass
-      ? { username: user, password: pass, identity: "user" }
-      : undefined;
+  const asPat = token ? { username: token, password: "PAT", identity: "pat" as const } : undefined;
+  const asUser = user && pass ? { username: user, password: pass, identity: "user" as const } : undefined;
+  const identity = hosting === "cloud" ? (asPat ?? asUser) : (asUser ?? asPat);
 
   const missing = [
     ["PRIORITY_HOST_URL", url],
@@ -380,8 +441,9 @@ export function loadWebSdkConfig(company_?: string): WebSdkConfig | { error: str
         `and could not be derived from PRIORITY_ODATA_URL.\n\n` +
         `PRIORITY_HOST_URL is the SDK service URL: the host root (https://your-host/) ` +
         `on a self-hosted Priority, or https://<host>/wcf/service.svc on Priority's ` +
-        `cloud (derived automatically for *.priority-connect.online). The identity is ` +
-        `the PAT when PRIORITY_API_TOKEN is set, otherwise PRIORITY_USER/PRIORITY_PASS.`,
+        `cloud (derived from PRIORITY_HOSTING, or from the host name when unset). The ` +
+        `identity is the PAT or PRIORITY_USER/PRIORITY_PASS, tried in the order the ` +
+        `hosting kind calls for; either one is enough.`,
     };
   }
 
@@ -390,29 +452,30 @@ export function loadWebSdkConfig(company_?: string): WebSdkConfig | { error: str
     url: url!,
     company: company!,
     ...identity!,
+    hosting,
     tabulaini: env("PRIORITY_TABULAINI") ?? derived?.tabulaini ?? "tabula.ini",
     catalogPath: path.isAbsolute(catalog) ? catalog : path.join(PROJECT_ROOT, catalog),
   };
 }
 
 /**
- * The Web SDK service URL for a host root.
+ * The Web SDK service URL for a host root, by hosting kind.
  *
  * Self-hosted: the root itself; the SDK appends `/wcf/wcf/Service.svc`.
- * Priority's cloud (`*.priority-connect.online`): the SDK documentation gives
- * `https://<host>/wcf/service.svc` -- one `wcf`, and ending in `.svc` so the SDK
- * appends nothing. Measured 2026-09-02 on t.eu.priority-connect.online: the
- * derived `/wcf/wcf/Service.svc` answered 403 and the SDK reported "Can't
- * connect to server"; the documented URL logged in.
+ * Cloud: Priority's SDK documentation gives `https://<host>/wcf/service.svc` --
+ * one `wcf`, and ending in `.svc` so the SDK appends nothing. Measured
+ * 2026-09-02 on t.eu.priority-connect.online: the derived `/wcf/wcf/Service.svc`
+ * answered 403 and the SDK reported "Can't connect to server"; the documented
+ * URL logged in.
  */
-export function webSdkUrlFor(hostRoot: string): string {
+export function webSdkUrlFor(hostRoot: string, hosting: Hosting): string {
+  if (hosting !== "cloud") return hostRoot;
   try {
-    const u = new URL(hostRoot);
-    if (/\.priority-connect\.online$/i.test(u.hostname)) return `${u.origin}/wcf/service.svc`;
+    return `${new URL(hostRoot).origin}/wcf/service.svc`;
   } catch {
     // Not a URL we can inspect; hand it back and let the SDK say so.
+    return hostRoot;
   }
-  return hostRoot;
 }
 
 function deriveFromODataUrl(

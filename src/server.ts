@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { ConfigError, listEnvironments, loadConfig, resolveEnvironment } from "./config.js";
+import { ConfigError, detectHosting, listEnvironments, loadConfig, resolveEnvironment } from "./config.js";
 import { CompanyContext } from "./companies.js";
 import { elicitCredentials, loadAuthPolicy } from "./auth.js";
 import { PriorityODataError } from "./odata.js";
@@ -98,6 +98,10 @@ export function buildServer(
     // every call is far harder to diagnose than a refusal to start.
     const initial = resolveEnvironment(opts.company ?? null);
     loadConfig(initial);
+    // Said once at startup so a wrong guess is visible before a program tool is
+    // ever called. Configured for several installations, this is the setting
+    // most likely to be right on one of them and wrong on another.
+    log(`hosting: ${detectHosting().detail}`);
     ctx = new CompanyContext(initial, opts.authHeader);
   } catch (err) {
     if (err instanceof ConfigError) {

@@ -133,6 +133,11 @@ see [.env.example](.env.example). The three that decide the shape of a deploymen
 - **`PRIORITY_AUTH_MODE`** — `shared` (one identity from `.env`), `headers` (each caller
   supplies its own), or `elicit` (the client asks its user). Header and elicited
   credentials never enter the model's context, which is why there is no `login()` tool.
+- **`PRIORITY_HOSTING`** — `cloud` or `self-hosted`; detected from the host name when
+  empty and stated in the startup log. It decides how the Web SDK is reached
+  (`https://<host>/wcf/service.svc` on the cloud, the host root elsewhere) and which
+  identity is tried first (PAT on the cloud, the named user elsewhere). Pin it when one
+  `.env` serves several installations.
 - **`PRIORITY_READ_ONLY`** — `1` removes `run_program`, leaving no way to change
   anything. Discovery and read tools are never gated: without them a model cannot learn
   a screen name and goes back to inferring one, which is the failure above.

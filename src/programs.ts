@@ -270,12 +270,13 @@ export class ProgramRunner {
       const who = cfg.identity === "pat" ? "the PAT" : `user ${cfg.username}`;
       throw new Error(
         `The Web SDK could not log in to ${cfg.url} (tabula ${cfg.tabulaini}, company ` +
-          `${cfg.company}) as ${who}: ${detail}. Unless the URL ends in .svc the SDK ` +
-          `appends /wcf/wcf/Service.svc to it; Priority's cloud wants ` +
-          `https://<host>/wcf/service.svc instead, which is derived automatically for ` +
-          `*.priority-connect.online and can be set explicitly as PRIORITY_HOST_URL. ` +
-          `"Can't connect to server" is also what the SDK says when the identity is ` +
-          `refused, so check the token or user before the network.`,
+          `${cfg.company}, hosting ${cfg.hosting}) as ${who}: ${detail}. Unless the URL ` +
+          `ends in .svc the SDK appends /wcf/wcf/Service.svc to it; Priority's cloud ` +
+          `wants https://<host>/wcf/service.svc instead. The URL and the identity order ` +
+          `follow PRIORITY_HOSTING (cloud / self-hosted; detected from the host name ` +
+          `when unset), and PRIORITY_HOST_URL overrides the URL outright. "Can't ` +
+          `connect to server" is also what the SDK says when the identity is refused, ` +
+          `so check the token or user before the network.`,
       );
     }
 
