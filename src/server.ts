@@ -968,9 +968,14 @@ procedure act, so guessing them is how you run something you did not intend.
 
 A parameter you do not mention KEEPS its defaultValue -- it is not blanked.
 
-Status values: 'needs_input' (parameters listed, nothing ran), 'completed',
-'message' (Priority said something -- read 'messages'), 'not_found' (no such
-program), 'unmatched_inputs', 'needs_choice', 'error'.
+Status values: 'needs_input' (parameters listed, nothing ran), 'would_run',
+'completed', 'message' (Priority said something -- read 'messages'),
+'not_found' (no such program), 'unmatched_inputs', 'needs_choice', 'error'.
+
+'would_run' means the PROCEDURE takes no parameters at all, so there was nothing
+to report and nothing was run -- it would have started acting immediately. Say
+what it does and get the user's agreement, then call again with inputs:{} to run
+it deliberately. Reports (R) do not stop this way; rendering output is harmless.
 
 'needs_choice' means the program asked to choose between options and this tool
 will not choose for you -- 'options' lists them and nothing ran. Use

@@ -144,6 +144,7 @@ export interface ProgramRunResult {
     | "completed"
     | "needs_input"
     | "needs_choice"
+    | "would_run"
     | "message"
     | "not_found"
     | "error"
@@ -373,16 +374,24 @@ export class ProgramRunner {
   // -- one-call running ------------------------------------------------------
 
   /**
-   * Check whether a program exists, without running it.
+   * Check whether a program exists and what it wants, without running it.
    *
    * `procStart` does not throw on a missing name: it opens successfully and
    * reports `No such Tabula Entity` as an ordinary message. So existence has to
    * be read out of the message text, and a caller that only checks for a thrown
    * error concludes that every name exists.
    *
-   * Deliberately never sends input values. Supplying a parameter is what makes a
-   * procedure act -- a file path handed to KAR_EXECUPGRADES runs a real upgrade --
-   * so a probe that filled them in would not be a probe.
+   * Never sends input values. Supplying a parameter is what makes a procedure
+   * act -- a file path handed to an upgrade procedure runs a real upgrade -- so
+   * a probe that filled them in would not be a probe.
+   *
+   * And never advances a PROCEDURE past a step that is not an input dialog.
+   * Measured 2026-09-03: a procedure with no parameters ran to completion under
+   * a probe and reported `completed`, because the loop only stopped at
+   * `inputFields`. The tool that calls this promises the first call does not
+   * run anything, so for a P it now stops at the first step that would act and
+   * answers `would_run`. A REPORT is allowed to finish: rendering output is what
+   * a report is, and Priority's own R/P split is the line being drawn.
    */
   async probe(name: string, type: "P" | "R" = "P"): Promise<ProgramRunResult> {
     return this.drive(name, type, undefined, true, false);
@@ -426,14 +435,23 @@ export class ProgramRunner {
         const text = String(step.message ?? "");
         result.messages.push(text);
 
+        // Existence is settled before anything else: a missing name must read as
+        // not_found, not as a procedure that is about to act.
         if (text.includes(NOT_FOUND_MARKER)) {
           result.status = "not_found";
           await proc?.cancel?.().catch(() => undefined);
           return finish(result, html, keepHtml);
         }
         if (String(step.messagetype ?? "").toLowerCase() === "error") result.status = "error";
+        if (stopBeforeActing(result, proc, probeOnly, type, kind)) return finish(result, html, keepHtml);
         step = await proc?.message?.(1);
         continue;
+      }
+
+      // Every remaining step advances the program. For a procedure under a probe
+      // that IS the action, so stop here rather than take it.
+      if (kind !== "inputFields" && stopBeforeActing(result, proc, probeOnly, type, kind)) {
+        return finish(result, html, keepHtml);
       }
 
       if (kind === "inputFields") {
@@ -808,6 +826,30 @@ export class ProgramRunner {
 }
 
 // -- helpers -----------------------------------------------------------------
+
+/**
+ * Stop a probe of a PROCEDURE at the first step that would advance it.
+ *
+ * Returns true when the caller should give up the run. Cancels the program on
+ * the way out, so nothing is left open on the Priority server.
+ */
+function stopBeforeActing(
+  result: ProgramRunResult,
+  proc: ProcMethods | undefined,
+  probeOnly: boolean,
+  type: "P" | "R",
+  kind: string,
+): boolean {
+  if (!probeOnly || type !== "P") return false;
+  result.status = "would_run";
+  result.messages.push(
+    `Nothing was run. ${result.program} asks for no parameters, so it would begin acting ` +
+      `immediately (its first step is '${kind}'). Read help{name:'${result.program}', type:'P'} ` +
+      `and tell the user what it does; call again with inputs:{} to run it deliberately.`,
+  );
+  void proc?.cancel?.().catch(() => undefined);
+  return true;
+}
 
 function describeFields(fields: EditField[]): InputField[] {
   return fields.map((f) => {

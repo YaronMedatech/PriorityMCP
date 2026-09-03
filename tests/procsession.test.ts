@@ -215,7 +215,46 @@ console.log("\n4. A program that does not exist");
   else bad(`missing program: ${JSON.stringify(s.step).slice(0, 200)}`);
 }
 
-console.log("\n5. Session misuse is a CallerError, not a Priority failure");
+console.log("\n5. A probe of a PARAMETERLESS procedure does not run it");
+{
+  // The tool promises the first call runs nothing. A procedure with no input
+  // dialog used to sail past that promise, because the loop only stopped at
+  // 'inputFields'. With every procedure in the installation now reachable, the
+  // promise has to hold for the ones that ask nothing too.
+  const mk = (acted: string[]) => ({
+    login: async () => undefined,
+    procStart: async () => ({
+      type: "message",
+      message: "Posted 412 documents.",
+      messagetype: "info",
+      proc: {
+        message: async () => (acted.push("RAN"), { type: "end" }),
+        cancel: async () => (acted.push("cancelled"), undefined),
+      },
+    }),
+  });
+  let acted: string[] = [];
+  let r = await new ProgramRunner(undefined, mk(acted) as unknown as Record<string, unknown>).probe("PARAMLESS", "P");
+  if (r.status === "would_run" && !acted.includes("RAN") && acted.includes("cancelled")) {
+    ok("a procedure probe stops with would_run and cancels");
+  } else bad(`P probe: status=${r.status} acted=${acted.join(",")}`);
+  const said = r.messages.join(" ");
+  if (said.includes("inputs:{}") && said.includes("help{")) {
+    ok("the message says how to run it deliberately, and to read help first");
+  } else bad(`message: ${said}`);
+
+  acted = [];
+  r = await new ProgramRunner(undefined, mk(acted) as unknown as Record<string, unknown>).probe("PARAMLESS", "R");
+  if (r.status === "completed" && acted.includes("RAN")) ok("a REPORT still renders -- that is what a report is");
+  else bad(`R probe: status=${r.status} acted=${acted.join(",")}`);
+
+  acted = [];
+  r = await new ProgramRunner(undefined, mk(acted) as unknown as Record<string, unknown>).run("PARAMLESS", "P", {});
+  if (r.status === "completed" && acted.includes("RAN")) ok("inputs:{} runs the procedure deliberately");
+  else bad(`deliberate run: status=${r.status} acted=${acted.join(",")}`);
+}
+
+console.log("\n6. Session misuse is a CallerError, not a Priority failure");
 {
   // The tool wrapper words the two differently, and the difference is what stops
   // a model reporting an ERP outage over an argument it chose itself.
@@ -240,7 +279,7 @@ console.log("\n5. Session misuse is a CallerError, not a Priority failure");
   await runner.continue(s1.session, { cancel: true });
 }
 
-console.log("\n6. htmlToText keeps rows and cells apart");
+console.log("\n7. htmlToText keeps rows and cells apart");
 const t = htmlToText("<html><head><style>x</style></head><body><table>\n  <tr>\n    <td>a</td>\n    <td>b</td>\n  </tr>\n  <tr><td>c</td></tr></table></body></html>");
 if (t === "a\tb\nc") ok("pretty-printed HTML flattens to a\\tb / c");
 else bad(`got ${JSON.stringify(t)}`);
