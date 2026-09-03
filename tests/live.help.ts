@@ -24,11 +24,15 @@ const bad = (m: string) => {
 };
 const skip = (m: string) => console.log(`  SKIP ${m}`);
 
-console.log("\n1. Entity help: screen, report, procedure");
+console.log("\n1. Entity help: one of each kind, through its own generator screen");
+// Measured 2026-09-03: these three carry help. FORMTRIGREP and FORMMSG do NOT,
+// and their 404 is Priority saying "none recorded" rather than a fault -- so the
+// suite names entities known to have text, and still treats "none recorded" for
+// any single name as a skip, since an installation may document different ones.
 for (const [name, type] of [
   ["AINVOICES", "F"],
-  ["FORMTRIGREP", "R"],
-  ["FORMMSG", "P"],
+  ["PARTFAMILY", "R"],
+  ["BUDREPDET", "P"],
 ] as const) {
   const o = await fetchEntityHelpOutcome(client, dict, name, type);
   if (o.available) {
@@ -37,6 +41,8 @@ for (const [name, type] of [
   } else if (o.permission) {
     skip(`${name}(${type}): refused by permission — reported as such: "${o.reason.slice(0, 70)}…"`);
     if (/no help/i.test(o.reason.split("Do not")[0] ?? "")) bad("a permission refusal was worded as missing help");
+  } else if (/no help recorded/.test(o.reason)) {
+    skip(`${name}(${type}): Priority records none — an answer, not a failure`);
   } else {
     bad(`${name}(${type}): ${o.reason}`);
   }
@@ -55,11 +61,18 @@ if (col.available) {
   bad(`column help: ${col.reason}`);
 }
 
-console.log("\n3. A wrong type letter is 'not found', not 'permission'");
+console.log("\n3. The wrong kind reads the wrong generator, and says so");
+// AINVOICES is a screen. Asked for as a report it looks in EREP, where no such
+// row exists -- which on these paths returns 200 with zero rows, not a 404.
 const wrong = await fetchEntityHelpOutcome(client, dict, "AINVOICES", "R");
-if (!wrong.available) {
-  ok(`AINVOICES as a report: ${wrong.permission ? "permission" : "not available"} — ${wrong.reason.slice(0, 70)}`);
-} else bad("AINVOICES has report help?");
+if (!wrong.available && /no entity of that name and type exists|no such entity/.test(wrong.reason)) {
+  ok(`AINVOICES as a report: "${wrong.reason.slice(0, 80)}…"`);
+} else bad(`wrong-kind wording: ${JSON.stringify(wrong).slice(0, 200)}`);
+// An interface has no help sub-form anywhere, so this is answered without a request.
+const noRoute = await fetchEntityHelpOutcome(client, dict, "SOMETHING", "I");
+if (!noRoute.available && /nothing to read/.test(noRoute.reason)) {
+  ok("an interface says Priority keeps no help for that kind at all");
+} else bad(`interface wording: ${JSON.stringify(noRoute).slice(0, 160)}`);
 
 console.log("\n4. describe_screen carries the reason, and column help on request");
 const desc = (await describeScreen(client, dict, {

@@ -520,7 +520,7 @@ refused.`,
       title: "Priority's own help for a screen, column, report or procedure",
       annotations: READ_ONLY_HINTS,
       description: `Read Priority's own documentation for one thing: a screen (F), a report (R), a
-procedure (P), an interface (I), a menu (M) -- or a single COLUMN of a screen.
+procedure (P), a menu (M) -- or a single COLUMN of a screen.
 
 describe_screen already includes a screen's help. Use this tool when you need:
 - what a REPORT or PROCEDURE does BEFORE running it (type 'R' or 'P'). Short of
@@ -533,18 +533,24 @@ The text is Priority's own, in Hebrew, with HTML removed and {ENTITY.TYPE}
 references resolved to names and titles where known; 'references' lists them as
 data.
 
-'available: false' carries a 'reason' -- READ IT. 'permission: true' means the help
-exists and this API user is not allowed to read it: say that, do not report that
-no help exists. Names are CASE-SENSITIVE, and one name can exist as several types
-(FORMMSG is both a report and a procedure), so pass the type you mean.`,
+'available: false' carries a 'reason' -- READ IT, because the cases differ. It may
+say Priority records no help for this entity (an answer: report it and move on),
+that no entity of that name and type exists (fix the name or the type), or
+'permission: true' -- the help exists and this API user may not read it, which is
+for the operator to grant.
+
+Names are CASE-SENSITIVE, and one name can exist as several types (FORMMSG is
+both a report and a procedure), so pass the type you mean: each kind's help lives
+somewhere different and the wrong type reads the wrong place.`,
       inputSchema: {
         name: z.string().describe("Entity name, e.g. AINVOICES or FORMTRIGREP. CASE-SENSITIVE."),
         type: z
-          .enum(["F", "P", "R", "I", "M"])
+          .enum(["F", "P", "R", "M"])
           .optional()
           .describe(
-            "F screen (default), P procedure, R report, I interface, M menu. Ignored " +
-              "when 'column' is given: column help belongs to screens.",
+            "F screen (default), P procedure, R report, M menu. Each kind keeps its help " +
+              "under its own generator screen, so the type has to be right. Ignored when " +
+              "'column' is given: column help belongs to screens.",
           ),
         column: z
           .string()
