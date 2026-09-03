@@ -267,12 +267,15 @@ export class ProgramRunner {
       // The SDK rejects with a plain object, and String() of that is
       // "[object Object]" -- which hides the one fact that matters.
       const detail = err instanceof Error ? err.message : JSON.stringify(err);
+      const who = cfg.identity === "pat" ? "the PAT" : `user ${cfg.username}`;
       throw new Error(
         `The Web SDK could not log in to ${cfg.url} (tabula ${cfg.tabulaini}, company ` +
-          `${cfg.company}) as ${cfg.username}: ${detail}. The SDK posts to ` +
-          `<PRIORITY_HOST_URL>/wcf/wcf/Service.svc; on a hosted installation that ` +
-          `path may sit under a tenant segment, in which case PRIORITY_HOST_URL must ` +
-          `be set explicitly rather than derived from the OData URL.`,
+          `${cfg.company}) as ${who}: ${detail}. Unless the URL ends in .svc the SDK ` +
+          `appends /wcf/wcf/Service.svc to it; Priority's cloud wants ` +
+          `https://<host>/wcf/service.svc instead, which is derived automatically for ` +
+          `*.priority-connect.online and can be set explicitly as PRIORITY_HOST_URL. ` +
+          `"Can't connect to server" is also what the SDK says when the identity is ` +
+          `refused, so check the token or user before the network.`,
       );
     }
 

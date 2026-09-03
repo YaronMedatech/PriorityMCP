@@ -32,15 +32,22 @@ loadEnvFile();
 
 export interface WebSdkConfig {
   /**
-   * HOST ROOT, not the OData path. The Web SDK builds its own URLs from this, so
-   * `https://host/` is right and `https://host/odata/Priority/...` is not — the
-   * two channels genuinely need different values for what looks like one setting.
+   * The Web SDK's service URL. On a self-hosted Priority this is the HOST ROOT
+   * (`https://host/`; the SDK appends `/wcf/wcf/Service.svc`). On Priority's
+   * cloud it is the documented `https://<host>/wcf/service.svc` -- one `wcf`,
+   * ending in `.svc` so the SDK appends nothing. Never the OData path.
    */
   url: string;
   company: string;
-  /** A real Priority user. A PAT authenticates OData but is rejected here. */
+  /**
+   * Either a real Priority user, or a PAT sent as `username=<token>,
+   * password='PAT'` -- documented since Priority 19.1 and measured working on
+   * the cloud on 2026-09-02, where the named user was refused.
+   */
   username: string;
   password: string;
+  /** Which of the two the identity is, for logs. */
+  identity: "pat" | "user";
   tabulaini: string;
   /** Absolute path to the runnable-program catalog. */
   catalogPath: string;
@@ -338,20 +345,29 @@ export function loadWebSdkConfig(company_?: string): WebSdkConfig | { error: str
   // Explicit values still win, for an install where the two really do differ.
   const derived = deriveFromODataUrl(env("PRIORITY_ODATA_URL"));
 
-  const url = env("PRIORITY_HOST_URL") ?? derived?.host;
+  const url = env("PRIORITY_HOST_URL") ?? (derived?.host ? webSdkUrlFor(derived.host) : undefined);
   // The session's company wins over both the setting and the URL. A program run
   // against a different company from the one being read would act on data the
   // caller never looked at.
   const company =
     company_ ?? env("PRIORITY_COMPANY") ?? (derived?.company || undefined) ?? defaultEnvironment() ?? undefined;
-  const username = env("PRIORITY_USER");
-  const password = env("PRIORITY_PASS");
+
+  // PAT first. It is the identity OData already uses, so both channels act as
+  // the same user, and on the cloud it is the one that logs in at all: measured
+  // 2026-09-02, the named user in .env was refused where the token succeeded.
+  const token = env("PRIORITY_API_TOKEN");
+  const user = env("PRIORITY_USER");
+  const pass = env("PRIORITY_PASS");
+  const identity: { username: string; password: string; identity: "pat" | "user" } | undefined = token
+    ? { username: token, password: "PAT", identity: "pat" }
+    : user && pass
+      ? { username: user, password: pass, identity: "user" }
+      : undefined;
 
   const missing = [
     ["PRIORITY_HOST_URL", url],
     ["PRIORITY_COMPANY", company],
-    ["PRIORITY_USER", username],
-    ["PRIORITY_PASS", password],
+    ["PRIORITY_API_TOKEN or PRIORITY_USER+PRIORITY_PASS", identity],
   ]
     .filter(([, v]) => !v)
     .map(([k]) => k as string);
@@ -362,9 +378,10 @@ export function loadWebSdkConfig(company_?: string): WebSdkConfig | { error: str
         `Running programs needs the Web SDK channel, which is not configured: ` +
         `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} unset in .env ` +
         `and could not be derived from PRIORITY_ODATA_URL.\n\n` +
-        `PRIORITY_HOST_URL is the HOST ROOT (https://your-host/), not the OData URL. ` +
-        `A PAT does not work here — the SDK needs a real Priority user, so ` +
-        `PRIORITY_USER and PRIORITY_PASS must be set even if OData uses a token.`,
+        `PRIORITY_HOST_URL is the SDK service URL: the host root (https://your-host/) ` +
+        `on a self-hosted Priority, or https://<host>/wcf/service.svc on Priority's ` +
+        `cloud (derived automatically for *.priority-connect.online). The identity is ` +
+        `the PAT when PRIORITY_API_TOKEN is set, otherwise PRIORITY_USER/PRIORITY_PASS.`,
     };
   }
 
@@ -372,11 +389,30 @@ export function loadWebSdkConfig(company_?: string): WebSdkConfig | { error: str
   return {
     url: url!,
     company: company!,
-    username: username!,
-    password: password!,
+    ...identity!,
     tabulaini: env("PRIORITY_TABULAINI") ?? derived?.tabulaini ?? "tabula.ini",
     catalogPath: path.isAbsolute(catalog) ? catalog : path.join(PROJECT_ROOT, catalog),
   };
+}
+
+/**
+ * The Web SDK service URL for a host root.
+ *
+ * Self-hosted: the root itself; the SDK appends `/wcf/wcf/Service.svc`.
+ * Priority's cloud (`*.priority-connect.online`): the SDK documentation gives
+ * `https://<host>/wcf/service.svc` -- one `wcf`, and ending in `.svc` so the SDK
+ * appends nothing. Measured 2026-09-02 on t.eu.priority-connect.online: the
+ * derived `/wcf/wcf/Service.svc` answered 403 and the SDK reported "Can't
+ * connect to server"; the documented URL logged in.
+ */
+export function webSdkUrlFor(hostRoot: string): string {
+  try {
+    const u = new URL(hostRoot);
+    if (/\.priority-connect\.online$/i.test(u.hostname)) return `${u.origin}/wcf/service.svc`;
+  } catch {
+    // Not a URL we can inspect; hand it back and let the SDK say so.
+  }
+  return hostRoot;
 }
 
 function deriveFromODataUrl(
