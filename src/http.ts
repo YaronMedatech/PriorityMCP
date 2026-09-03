@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -152,7 +152,32 @@ function callerCredentials(req: http.IncomingMessage, encrypted: boolean): Calle
   const authHeader = pat
     ? "Basic " + Buffer.from(`${pat}:PAT`).toString("base64")
     : "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
-  return { label: pat ? "header-pat" : `header:${user}`, authHeader, company: requestedCompany(req) };
+  return { label: callerLabel(pat, user), authHeader, company: requestedCompany(req) };
+}
+
+/**
+ * A name for this caller that is safe to write to the log.
+ *
+ * The label goes into every tool-call line, so it must never be a credential.
+ * A PAT sent as X-Priority-Token was already safe -- it labelled as "header-pat"
+ * -- but the SAME token sent as X-Priority-User was not: it landed in the log
+ * verbatim as `header:571EEA50E4B74359A266558469FD177C`. Observed, and not a
+ * hypothetical: on Priority's cloud a password is refused for OData, so putting
+ * the token in the username field is exactly what a caller reaches for.
+ *
+ * A value that looks like a token is therefore fingerprinted rather than shown.
+ * Eight hex characters are enough to tell two callers apart in a log and are not
+ * enough to authenticate with.
+ */
+function callerLabel(pat: string | null, user: string | null): string {
+  if (pat) return "header-pat";
+  const name = user ?? "?";
+  // A Priority username is a short login; 24+ characters of hex or base32 is a
+  // secret someone has pasted into the wrong field.
+  if (name.length >= 24 && /^[A-Za-z0-9+/=_-]+$/.test(name)) {
+    return `header-token:${createHash("sha1").update(name).digest("hex").slice(0, 8)}`;
+  }
+  return `header:${name}`;
 }
 
 function authenticate(req: http.IncomingMessage): Caller | null | "insecure" {
