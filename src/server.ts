@@ -722,19 +722,42 @@ not obvious which company is meant. Do not assume the active one is the intended
 one just because it is the default.
 
 'active: true' marks the company being read right now. 'name' can be null when
-the ENVIRONMENT screen is unreadable or empty — 'note' says which.`,
+the ENVIRONMENT screen is unreadable or empty.
+
+'namesUnavailable' means the company list is COMPLETE and only the display names
+are missing. The codes still work with use_company, so offer those and say why
+the names are absent -- never report that no companies were found.`,
       inputSchema: {},
     },
     handler("list_companies", async () => {
-      const companies = await ctx.describeAll();
+      const { companies, problem } = await ctx.describeAll();
       const notOffered = await ctx.unofferedEnvironments();
+      const named = companies.filter((c) => c.name).length;
       return {
         active: ctx.company,
         companies,
         ...(notOffered.length ? { notOfferedByThisServer: notOffered } : {}),
-        note:
-          "Show the user the 'name' of each company, not the code, and let them pick. " +
-          "Then call use_company with that company's code.",
+        // Do not tell the model to show names it has not got. The advice has to
+        // follow what the reply actually contains, or a model relays "the
+        // companies could not be found" when it is holding all of their codes.
+        ...(problem
+          ? {
+              namesUnavailable: problem,
+              note:
+                `These ${companies.length} companies ARE available and 'company' is the code to ` +
+                `pass to use_company — the list is complete. Only their display NAMES are ` +
+                `missing, because Priority's ENVIRONMENT screen could not be read: ${problem} ` +
+                `Offer the codes, say the names are unavailable and why, and do not report that ` +
+                `no companies were found.`,
+            }
+          : {
+              note:
+                `Show the user the 'name' of each company, not the code, and let them pick. ` +
+                `Then call use_company with that company's code.` +
+                (named < companies.length
+                  ? ` ${companies.length - named} have no name; offer those by code.`
+                  : ``),
+            }),
       };
     }),
   );

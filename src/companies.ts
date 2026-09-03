@@ -55,8 +55,21 @@ export interface EnvironmentRow {
   colour: string | null;
 }
 
-/** Read once per installation; the screen is identical from every company. */
-let environmentCache: Promise<{ rows: EnvironmentRow[]; note?: string }> | undefined;
+/**
+ * Cached per IDENTITY, and only on success.
+ *
+ * Both halves were wrong before, and together they produced a confusing
+ * failure. One global entry held whatever the FIRST session in the process got,
+ * including a failure -- so a caller whose credentials Priority rejected cached
+ * a 401 for everyone, and every later session, whatever it authenticated as, was
+ * served that same 401. Measured: a fresh process with the same .env reads all
+ * nine environments with their Hebrew names.
+ *
+ * Keyed per identity because whether ENVIRONMENT can be read is a property of the
+ * caller, not of the installation. Failures are never cached: a rejected
+ * credential is not a fact about the data, and retrying costs one request.
+ */
+const environmentCache = new Map<string, Promise<{ rows: EnvironmentRow[]; note?: string }>>();
 
 /**
  * The ENVIRONMENT screen: EVERY environment on this installation, one row each.
@@ -72,7 +85,11 @@ let environmentCache: Promise<{ rows: EnvironmentRow[]; note?: string }> | undef
 export async function readEnvironments(
   client: PriorityODataClient,
 ): Promise<{ rows: EnvironmentRow[]; note?: string }> {
-  environmentCache ??= (async () => {
+  const key = client.identityKey;
+  const cached = environmentCache.get(key);
+  if (cached) return cached;
+
+  const pending = (async () => {
     try {
       const raw = await client.query("ENVIRONMENT", { top: 500 });
       const rows: EnvironmentRow[] = raw
@@ -88,17 +105,21 @@ export async function readEnvironments(
       return { rows };
     } catch (err) {
       // Not fatal: every company code still works. Only the friendly names are
-      // missing, and saying why beats an unexplained null.
+      // missing, and saying why beats an unexplained null. Dropped from the cache
+      // on the way out, so the next caller -- or the next attempt by this one --
+      // is not answered from a stale refusal.
+      environmentCache.delete(key);
       const message = err instanceof Error ? (err.message.split("\n")[0] ?? err.message) : String(err);
       return { rows: [], note: `ENVIRONMENT could not be read: ${message}` };
     }
   })();
-  return environmentCache;
+  environmentCache.set(key, pending);
+  return pending;
 }
 
-/** Test seam: forget the cached ENVIRONMENT read. */
+/** Test seam, and used when a session adopts new credentials. */
 export function resetEnvironmentCache(): void {
-  environmentCache = undefined;
+  environmentCache.clear();
 }
 
 interface CompanyChannel {
@@ -188,25 +209,34 @@ export class CompanyContext {
    * ONE request, not one per company: ENVIRONMENT lists every environment and is
    * the same from all of them.
    */
-  async describeAll(): Promise<CompanyInfo[]> {
+  /**
+   * The configured companies, with their real names when ENVIRONMENT is readable.
+   *
+   * The installation-wide problem is returned ONCE, not copied onto every row.
+   * Repeating the same 401 five times, with `name: null` on each, is what made a
+   * model report "the companies could not be found" for a server whose company
+   * list was in front of it.
+   */
+  async describeAll(): Promise<{ companies: CompanyInfo[]; problem?: string }> {
     const allowed = listEnvironments();
     const { rows, note } = await readEnvironments(this.client);
     const byCode = new Map(rows.map((r) => [r.code, r]));
 
-    return allowed.map((code) => {
+    const companies = allowed.map((code) => {
       const row = byCode.get(code);
       return {
         company: code,
         name: row?.title ?? null,
         active: code === this.active,
         ...(row ? { environmentActive: row.active, colour: row.colour } : {}),
-        ...(note
-          ? { note }
-          : row
-            ? {}
-            : { note: "Allowed here, but Priority's ENVIRONMENT screen does not list it." }),
+        // A per-row note only when THIS row is the odd one out. When nothing
+        // could be read at all, the reason belongs to the reply, not the row.
+        ...(!note && !row
+          ? { note: "Allowed here, but Priority's ENVIRONMENT screen does not list it." }
+          : {}),
       };
     });
+    return { companies, ...(note ? { problem: note } : {}) };
   }
 
   /**

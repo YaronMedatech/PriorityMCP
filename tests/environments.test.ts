@@ -197,5 +197,57 @@ console.log("\n9. loadConfig returns a different URL per company");
   else bad("cache returned another company's config");
 }
 
+// ---------------------------------------------------------------------------
+// The ENVIRONMENT cache must never serve one caller's failure to another.
+//
+// Measured 2026-09-03 against the running service: an external LLM connected
+// with a username and password Priority rejected, its 401 was cached in a single
+// process-wide entry, and every later session -- including ones authenticating
+// with a working PAT -- was answered from that refusal. The model reported that
+// the companies could not be found while holding all five of their codes.
+// ---------------------------------------------------------------------------
+{
+  const { readEnvironments, resetEnvironmentCache } = await import("../src/companies.js");
+  type FakeClient = { identityKey: string; query: (e: string, o?: unknown) => Promise<Record<string, unknown>[]> };
+  const make = (key: string, rows: Record<string, unknown>[] | Error, calls: string[]): FakeClient => ({
+    identityKey: key,
+    query: async (e) => {
+      calls.push(`${key}:${e}`);
+      if (rows instanceof Error) throw rows;
+      return rows;
+    },
+  });
+  const good = [{ DNAME: "demo", TITLE: "מידעטק", ACTIVE: "Y", POS: 1 }];
+  const refusal = new Error("Priority rejected the credentials (HTTP 401) for host.\nsecond line");
+
+  resetEnvironmentCache();
+  const calls: string[] = [];
+  const bad401 = await readEnvironments(make("id-bad", refusal, calls) as never);
+  if (bad401.rows.length === 0 && /401/.test(bad401.note ?? "")) ok("a refused read reports the reason");
+  else bad(`refused read: ${JSON.stringify(bad401)}`);
+
+  // Same identity again: the failure must NOT have been cached.
+  const retry = await readEnvironments(make("id-bad", good, calls) as never);
+  if (retry.rows.length === 1) ok("the same identity retrying gets a fresh read, not the cached failure");
+  else bad(`retry: ${JSON.stringify(retry)}`);
+
+  // A different identity must never be answered from another's result.
+  resetEnvironmentCache();
+  const calls2: string[] = [];
+  await readEnvironments(make("id-bad", refusal, calls2) as never);
+  const other = await readEnvironments(make("id-good", good, calls2) as never);
+  if (other.rows[0]?.title === "מידעטק") ok("a working identity is unaffected by another's 401");
+  else bad(`other identity: ${JSON.stringify(other)}`);
+
+  // Success IS cached, per identity, so the screen is read once.
+  const calls3: string[] = [];
+  resetEnvironmentCache();
+  await readEnvironments(make("id-x", good, calls3) as never);
+  await readEnvironments(make("id-x", good, calls3) as never);
+  if (calls3.length === 1) ok("a successful read is cached: one request for two calls");
+  else bad(`${calls3.length} requests for two calls`);
+}
+
+
 console.log(failures === 0 ? "\nAll environment checks passed.\n" : `\n${failures} failure(s).\n`);
 process.exit(failures === 0 ? 0 : 1);

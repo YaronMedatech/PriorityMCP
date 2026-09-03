@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import https from "node:https";
 import http from "node:http";
 import crypto from "node:crypto";
@@ -222,6 +223,17 @@ export class PriorityODataClient {
   /** The Priority company this client reads. */
   get company(): string {
     return this.cfg.company;
+  }
+
+  /**
+   * A stable, non-secret key for "who this client acts as, where".
+   *
+   * Used to key installation-level caches per identity. It is a hash rather than
+   * the header itself so a cache key can never carry a credential into a log or
+   * an error message.
+   */
+  get identityKey(): string {
+    return `${this.cfg.odataUrl}#${createHash("sha1").update(this.cfg.authHeader).digest("hex").slice(0, 12)}`;
   }
 
   // -- low level -----------------------------------------------------------

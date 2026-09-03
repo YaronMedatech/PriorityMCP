@@ -118,7 +118,7 @@ if (ctx.company === activeBefore) ok(`still on ${activeBefore} after the refusal
 else bad(`the active company changed to ${ctx.company} despite the refusal`);
 
 console.log("\n7. describeAll lists every company, marking the active one");
-const all = await ctx.describeAll();
+const { companies: all, problem } = await ctx.describeAll();
 for (const c of all) {
   console.log(
     `   ${c.active ? "*" : " "} ${c.company.padEnd(10)} name=${JSON.stringify(c.name)}` +
@@ -129,6 +129,17 @@ if (all.length === companies.length) ok(`all ${companies.length} companies liste
 else bad(`${all.length} listed, expected ${companies.length}`);
 if (all.filter((c) => c.active).length === 1) ok("exactly one is marked active");
 else bad("active marking is wrong");
+// An installation-wide problem belongs to the reply once, not to every row: five
+// copies of one 401 with name:null on each is what read as "no companies found".
+if (problem) {
+  console.log(`   names unavailable: ${problem.slice(0, 80)}`);
+  if (all.every((c) => !c.note)) ok("the shared problem is NOT copied onto every row");
+  else bad("the problem was duplicated per company");
+} else if (all.every((c) => c.name)) {
+  ok("every company has its real name");
+} else {
+  ok(`${all.filter((c) => c.name).length}/${all.length} named; the rest carry their own note`);
+}
 
 console.log(failures === 0 ? "\nAll company-switching checks passed.\n" : `\n${failures} failure(s).\n`);
 process.exit(failures === 0 ? 0 : 1);
