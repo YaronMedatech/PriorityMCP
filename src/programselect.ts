@@ -27,6 +27,15 @@ export type ProgramPolicy = "catalog" | "all";
 export interface ResolvedProgram {
   name: string;
   type: "P" | "R";
+  /**
+   * The same name of the OTHER kind, when Priority has one.
+   *
+   * Worth carrying even on success: measured on BUDREPDET, the report answers
+   * `No values in report.` while the procedure of the same name is the one with
+   * the input dialog that produces them. A model that only sees the empty report
+   * reports failure; one that is told the twin exists can go and look.
+   */
+  twin?: ProgramCandidate;
   /** Hebrew title from EXEC, when the dictionary knows it. */
   title: string | null;
   /** Where the permission came from. */
@@ -37,11 +46,25 @@ export interface ResolvedProgram {
   caution?: string;
 }
 
+export interface ProgramCandidate {
+  name: string;
+  type: string;
+  title: string | null;
+}
+
 export interface ProgramRefusal {
   refused: true;
   reason: string;
+  /**
+   * The choices behind an ambiguous or mistyped name, as DATA.
+   *
+   * A refusal used to be prose only, so a model that hit `BUDREPDET exists as
+   * both a procedure and a report` had to parse a sentence to offer the user a
+   * choice. These are the same facts in a shape it can put on screen.
+   */
+  candidates?: ProgramCandidate[];
   /** Programs whose name is close to what was asked for. */
-  didYouMean?: { name: string; type: string; title: string | null }[];
+  didYouMean?: ProgramCandidate[];
   available?: string[];
 }
 
@@ -101,6 +124,7 @@ export function resolveProgram(
       title: opts.dict.getProgram(catalogued.name, catalogued.type)[0]?.title ?? null,
       source: "catalog",
       catalogEntry: catalogued,
+      ...twinOf(catalogued.name, catalogued.type, opts.dict),
     };
   }
 
@@ -139,9 +163,11 @@ export function resolveProgram(
     return {
       refused: true,
       reason:
-        `'${wanted}' exists as BOTH a procedure and a report ` +
-        `(${known.map((k) => `${k.kind}: ${k.title ?? "?"}`).join("; ")}), and they are ` +
-        `different things to run. Pass type:'P' or type:'R' to say which you mean.`,
+        `'${wanted}' exists as BOTH a procedure and a report, and they are different ` +
+        `things to run: the report renders output, the procedure can act. Show the user ` +
+        `'candidates' and pass type:'P' or type:'R' with their answer. A common Priority ` +
+        `pattern is a report that only displays what its procedure twin prepares.`,
+      candidates: known.map((k) => ({ name: k.screen, type: k.kind, title: k.title })),
     };
   }
 
@@ -151,6 +177,7 @@ export function resolveProgram(
     type: entry.kind as "P" | "R",
     title: entry.title,
     source: "dictionary",
+    ...twinOf(entry.screen, entry.kind, opts.dict),
     caution:
       `This program is NOT in the operator's catalog, so nothing is recorded here about ` +
       `what it does or what its parameters mean — only Priority's own title ` +
@@ -173,4 +200,14 @@ function nearMatches(wanted: string, dict: PriorityDictionary) {
     }
   }
   return out;
+}
+
+/** The same program name of the other kind, if Priority has one. */
+function twinOf(
+  name: string,
+  kind: string,
+  dict: PriorityDictionary,
+): { twin: ProgramCandidate } | Record<string, never> {
+  const other = dict.getProgram(name).find((p) => p.kind !== kind);
+  return other ? { twin: { name: other.screen, type: other.kind, title: other.title } } : {};
 }

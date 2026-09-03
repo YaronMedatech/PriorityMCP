@@ -73,9 +73,17 @@ else bad(JSON.stringify(r).slice(0, 250));
 r = resolveProgram("FORMMSG", { ...base, policy: "all" });
 if ("refused" in r && /BOTH a procedure and a report/.test(r.reason)) ok("a name that is both P and R is refused until the type is given");
 else bad(JSON.stringify(r).slice(0, 200));
+if ("refused" in r && r.candidates?.length === 2 && r.candidates.every((c) => c.name === "FORMMSG" && c.title)) {
+  ok("the refusal carries the choice as DATA, not only as prose");
+} else bad(`candidates: ${JSON.stringify("refused" in r ? r.candidates : null)}`);
 r = resolveProgram("FORMMSG", { ...base, policy: "all", type: "P" });
 if (!("refused" in r) && r.type === "P") ok("with type:'P' it resolves to the procedure");
 else bad(JSON.stringify(r).slice(0, 200));
+if (!("refused" in r) && r.twin?.type === "R") ok("and it names the report twin, so an empty run has somewhere to look");
+else bad(`twin: ${JSON.stringify("refused" in r ? null : r.twin)}`);
+const solo = resolveProgram("KAR_EXECUPGRADES", { ...base, policy: "all" });
+if (!("refused" in solo) && solo.twin === undefined) ok("a program with no twin carries none");
+else bad(`unexpected twin: ${JSON.stringify(solo)}`);
 r = resolveProgram("KAR_EXECUPGRADES", { ...base, policy: "all", deny: new Set(["KAR_EXECUPGRADES"]) });
 if ("refused" in r && /deny list/.test(r.reason)) ok("the deny list beats the open policy");
 else bad(JSON.stringify(r).slice(0, 200));

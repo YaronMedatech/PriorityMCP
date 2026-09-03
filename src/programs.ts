@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { loadWebSdkConfig, type WebSdkConfig } from "./config.js";
 import { CallerError } from "./errors.js";
+import { helpHtmlToText } from "./help.js";
 
 // Running Priority programs and reports, over the Web SDK.
 //
@@ -865,7 +866,12 @@ function describeFields(fields: EditField[]): InputField[] {
       title: String(f.title ?? ""),
       mandatory: Boolean(f.mandatory),
     };
-    const help = str("helpstring");
+    // Priority writes some helpstrings as plain text and others as HTML with an
+    // embedded code comment (`<p dir=rtl><!-- Code: BUDREPDET ... -->`). Measured
+    // on BUDREPDET: three of eight parameters arrived as markup. Forwarding that
+    // raw hands the model tags and a comment to read around, so it goes through
+    // the same cleaner as screen help.
+    const help = cleanHelp(str("helpstring"));
     if (help) out.help = help;
     const code = str("code");
     if (code) out.code = code;
@@ -909,11 +915,18 @@ function describeOperators(raw: unknown): OperatorChoice[] {
     .filter((o) => o.name !== "");
 }
 
+/** Strip Priority's markup from a help string, when it sent any. */
+function cleanHelp(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const text = /<[a-z!][^>]*>/i.test(raw) ? helpHtmlToText(raw) : raw.trim();
+  return text.trim() || undefined;
+}
+
 /** The dialog title and description around an input step. */
 function describeDialog(input: unknown): InputDialog | undefined {
   const r = (input ?? {}) as Record<string, unknown>;
   const title = typeof r["title"] === "string" ? r["title"].trim() : "";
-  const text = typeof r["text"] === "string" ? r["text"].trim() : "";
+  const text = cleanHelp(typeof r["text"] === "string" ? r["text"] : undefined) ?? "";
   if (!title && !text) return undefined;
   return { ...(title ? { title } : {}), ...(text ? { text } : {}) };
 }

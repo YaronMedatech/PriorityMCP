@@ -931,6 +931,81 @@ running them.`,
     });
   };
 
+  /**
+   * Turn a parameter's `TABLE.COLUMN` lookup into a screen the read tools can
+   * actually query.
+   *
+   * Priority names the lookup by TABLE, and a table is not always an entity set:
+   * measured, `GENLEDGERS` reads directly while `FAMILY` answers 404 and its rows
+   * live behind the `FAMILY_LOG` screen. Resolving that here is the difference
+   * between a model that can offer the user the real fiscal years and one that
+   * has to guess a value into a mandatory field.
+   */
+  const resolveLookup = (lookup: string): Record<string, unknown> => {
+    const [table = "", column = ""] = lookup.split(".");
+    const direct = ctx.dict.get(table);
+    const screen =
+      direct && direct.access === "direct"
+        ? direct
+        : ctx.dict.allEntries().find((e) => e.kind === "F" && e.table === table && e.access === "direct");
+    if (!screen) {
+      return {
+        lookup,
+        lookupNote:
+          `Values come from the ${table} table, but no screen over it is readable here, ` +
+          `so the value cannot be listed. Ask the user for it.`,
+      };
+    }
+    return {
+      lookup,
+      lookupScreen: screen.screen,
+      lookupColumn: column,
+      lookupNote:
+        `List the legal values with query{entity:'${screen.screen}', select:'${column}'} ` +
+        `and let the USER pick one. Do not invent a value for this field.`,
+    };
+  };
+
+  /** Attach the resolved lookups, so a needs_input reply is self-sufficient. */
+  const enrichFields = <T extends { inputFields?: { lookup?: string }[] }>(reply: T): T => {
+    for (const f of reply.inputFields ?? []) {
+      if (f.lookup) Object.assign(f, resolveLookup(f.lookup));
+    }
+    return reply;
+  };
+
+  /**
+   * Say plainly when a program finished having produced nothing.
+   *
+   * Priority reports an empty report as a message of type 'error', which this
+   * server turned into status:'error' -- so a model relayed "the report failed"
+   * for a report that ran perfectly and simply had no rows. Measured on
+   * BUDREPDET, whose data is prepared by a separate refresh procedure.
+   */
+  const explainEmpty = (reply: {
+    status: string;
+    output?: string;
+    messages: string[];
+    twin?: { name: string; type: string; title: string | null };
+  }): Record<string, unknown> => {
+    if (reply.output && reply.output.length > 0) return {};
+    if (!reply.messages.length) return {};
+    const twin = reply.twin;
+    return {
+      producedNoOutput: true,
+      note:
+        `The program ran and produced no output. Priority's own words are in 'messages' -- ` +
+        `relay them; a message like "No values in report" means the run succeeded and there ` +
+        `was nothing to show, which is an answer, not a failure.` +
+        (twin
+          ? ` Note that '${twin.name}' also exists as ${twin.type === "P" ? "a procedure" : "a report"}` +
+            ` (${twin.title ?? "untitled"}). In Priority a report is often only a view of data that ` +
+            `its procedure twin, or a REFRESH<name> procedure, prepares -- check with help{} before ` +
+            `concluding there is no data.`
+          : ""),
+    };
+  };
+
   if (readOnly) {
     log("run_program is NOT registered (PRIORITY_READ_ONLY) — this server cannot change Priority data");
   } else {
@@ -955,8 +1030,10 @@ everything Priority knows about the dialog it would show a person:
                   and 'format' (a date says DD/MM/YY), 'maxLength', whether it is
                   'mandatory', and 'defaultValue' -- the value Priority already
                   has from the previous run
-  inputFields[].lookup  where legal values come from, e.g. 'EXEC.ENAME', which
-                  you can read with the query tool to find one instead of guessing
+  inputFields[].lookup  where legal values come from. 'lookupScreen' is the
+                  screen to read them with, already resolved -- a lookup names a
+                  TABLE and a table is not always queryable. LIST THEM AND LET
+                  THE USER CHOOSE rather than inventing a value
   operators[]     the comparisons a parameter may use
 
 SHOW THAT TO THE USER before running a procedure: the titles and help are what a
@@ -1016,17 +1093,21 @@ program was NOT run -- 'unmatchedInputs' lists them. Fix the key to the exact
           const chosen = await pickProgram(args.name, args.type);
           if ("refused" in chosen) return chosen;
 
-          const result = args.inputs
-            ? await ctx.programs.run(chosen.name, chosen.type, args.inputs)
-            : await ctx.programs.probe(chosen.name, chosen.type);
-          return {
+          const result = enrichFields(
+            args.inputs
+              ? await ctx.programs.run(chosen.name, chosen.type, args.inputs)
+              : await ctx.programs.probe(chosen.name, chosen.type),
+          );
+          const reply = {
             ...result,
             program: chosen.name,
             title: chosen.title,
             permittedBy: chosen.source,
+            ...(chosen.twin ? { twin: chosen.twin } : {}),
             ...(chosen.catalogEntry ? { catalogEntry: chosen.catalogEntry } : {}),
             ...(chosen.caution ? { caution: chosen.caution } : {}),
           };
+          return { ...reply, ...explainEmpty(reply) };
         },
       ),
     );
@@ -1078,10 +1159,13 @@ already know and that asks no questions.`,
         if (err) return { available: false, reason: err };
         const chosen = await pickProgram(args.name, args.type);
         if ("refused" in chosen) return chosen;
+        const started = await ctx.programs.start(chosen.name, chosen.type);
+        enrichFields({ inputFields: started.step.fields });
         return {
-          ...(await ctx.programs.start(chosen.name, chosen.type)),
+          ...started,
           title: chosen.title,
           permittedBy: chosen.source,
+          ...(chosen.twin ? { twin: chosen.twin } : {}),
           ...(chosen.catalogEntry ? { catalogEntry: chosen.catalogEntry } : {}),
           ...(chosen.caution ? { caution: chosen.caution } : {}),
         };
@@ -1119,7 +1203,9 @@ without touching the program. 'choose' takes the 1-based 'index' from
       handler("continue_program", async (args: { session: string; action: SessionAction }) => {
         const err = ctx.programs.configError;
         if (err) return { available: false, reason: err };
-        return ctx.programs.continue(args.session, args.action);
+        const reply = await ctx.programs.continue(args.session, args.action);
+        enrichFields({ inputFields: reply.step.fields });
+        return reply;
       }),
     );
     registered.push("continue_program");
