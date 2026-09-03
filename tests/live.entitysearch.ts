@@ -49,8 +49,8 @@ if (dict.get("FORMMSG")?.kind === "F") ok("get('FORMMSG').kind === 'F'");
 else bad(`get('FORMMSG') = ${JSON.stringify(dict.get("FORMMSG"))}`);
 
 console.log("\n4. The tool reply marks runnable programs from the catalog");
-const reply = (await searchScreens(dict, { query: "מסך", kinds: ["P", "R"], limit: 10 }, undefined, undefined, new Set(["FORMTRIGREP", "FORMMSG", "FORMTREE", "FORMCLTRIGREP"]))) as {
-  screens: { screen: string; kind: string; runnable?: boolean }[];
+const reply = (await searchScreens(dict, { query: "מסך", kinds: ["P", "R"], limit: 10 }, undefined, undefined, { catalogued: new Set(["FORMTRIGREP", "FORMMSG", "FORMTREE", "FORMCLTRIGREP"]), policy: "catalog" })) as {
+  screens: { screen: string; kind: string; runnable?: boolean; documented?: boolean }[];
   totalMatches: number;
 };
 console.log(`   ${reply.totalMatches} program(s) match 'מסך'; first: ${reply.screens.slice(0, 5).map((s) => `${s.screen}(${s.kind})${s.runnable ? "*" : ""}`).join(", ")}`);

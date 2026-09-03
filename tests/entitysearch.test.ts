@@ -92,21 +92,40 @@ if (dict.get("FORMTRIGREP") === undefined) ok("a report is not a screen: get() r
 else bad("get() returned a program");
 
 console.log("\n5. search_screens decorates programs with runnable");
-const out = (await searchScreens(dict, { query: "הודעות", kinds: ["P", "R"] }, undefined, undefined, new Set(["FORMMSG"]))) as {
-  screens: { screen: string; kind: string; runnable?: boolean; catalogNote?: string }[];
-  notes: string[];
-};
+type ProgRow = { screen: string; kind: string; runnable?: boolean; documented?: boolean; catalogNote?: string };
+const out = (await searchScreens(dict, { query: "הודעות", kinds: ["P", "R"] }, undefined, undefined, {
+  catalogued: new Set(["FORMMSG"]),
+  policy: "catalog",
+})) as { screens: ProgRow[]; notes: string[] };
 const p = out.screens.find((s) => s.screen === "FORMMSG" && s.kind === "P");
 const r = out.screens.find((s) => s.screen === "FORMMSG" && s.kind === "R");
 if (p?.runnable === true && r?.runnable === true) ok("catalogued programs are runnable");
 else bad(`runnable flags: ${JSON.stringify([p, r])}`);
 const plain = (await searchScreens(dict, { query: "עץ", kinds: ["P"] })) as {
-  screens: { screen: string; runnable?: boolean; catalogNote?: string }[];
+  screens: ProgRow[];
   notes: string[];
 };
 const tree = plain.screens.find((s) => s.screen === "FORMTREE");
-if (tree?.runnable === false && tree.catalogNote) ok("an uncatalogued program says so");
-else bad(`FORMTREE: ${JSON.stringify(tree)}`);
+if (tree?.runnable === false && tree.documented === false && /will not run it/.test(tree.catalogNote ?? "")) {
+  ok("under the catalog policy an uncatalogued program is runnable:false and says so");
+} else bad(`FORMTREE: ${JSON.stringify(tree)}`);
+
+// The regression this pair exists for: with the policy open, EVERY program is
+// runnable, and reporting runnable:false because it lacks notes told a model
+// "cannot be run" about a program run_program would happily run.
+const open = (await searchScreens(dict, { query: "עץ", kinds: ["P"] }, undefined, undefined, {
+  catalogued: new Set(["FORMMSG"]),
+  policy: "all",
+})) as { screens: ProgRow[]; notes: string[] };
+const treeOpen = open.screens.find((s) => s.screen === "FORMTREE");
+if (treeOpen?.runnable === true && treeOpen.documented === false && /Runnable, but not in programs.json/.test(treeOpen.catalogNote ?? "")) {
+  ok("with the policy open it is runnable:true, documented:false");
+} else bad(`FORMTREE open: ${JSON.stringify(treeOpen)}`);
+if (open.notes.some((n) => /runs ANY procedure or report/.test(n))) ok("the note explains the open policy rather than the catalog rule");
+else bad("open-policy note missing");
+const msgOpen = open.screens.find((s) => s.screen === "FORMMSG");
+if (msgOpen === undefined || (msgOpen.runnable === true && msgOpen.documented === true)) ok("a catalogued program is documented:true");
+else bad(`FORMMSG open: ${JSON.stringify(msgOpen)}`);
 if (plain.notes.some((n) => /programs/.test(n) && /help/.test(n))) ok("the reply explains programs and points at help");
 else bad("no program note");
 const screensReply = (await searchScreens(dict, { query: "חשבוניות" })) as { screens: { kind: string; runnable?: boolean }[] };
@@ -117,8 +136,8 @@ console.log("\n6. readiness counts screens and programs separately");
 const rr = buildReadiness(dict, undefined, new Set(["FORMMSG"]));
 if (rr.totals.screens === 4) ok(`totals.screens stays ${rr.totals.screens}`);
 else bad(`totals.screens=${rr.totals.screens}`);
-if (rr.totals.programs === 4 && rr.totals.runnablePrograms === 2) ok("programs=4, runnable=2 (FORMMSG as P and as R)");
-else bad(`programs=${rr.totals.programs} runnable=${rr.totals.runnablePrograms}`);
+if (rr.totals.programs === 4 && rr.totals.documentedPrograms === 2) ok("programs=4, documented=2 (FORMMSG as P and as R)");
+else bad(`programs=${rr.totals.programs} documented=${rr.totals.documentedPrograms}`);
 const issue = rr.issues.find((i) => i.kind === "uncatalogued-programs");
 if (issue && issue.count === 2 && issue.severity === "low") ok("uncatalogued-programs reported as low severity with the right count");
 else bad(`issue: ${JSON.stringify(issue)}`);

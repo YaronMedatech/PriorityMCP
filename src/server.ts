@@ -431,17 +431,18 @@ traps the titles do not show -- read them before using the screens.
 
 PROCEDURES AND REPORTS are searchable too, by the same Hebrew titles: pass
 kinds: ['P','R'] (or ['F','P','R'] for everything). They are not screens and
-cannot be queried; each result carries 'kind' and 'runnable'. Read what one does
-with help{name, type} before anything else. 'runnable: false' means the operator's
-catalog does not list it -- report that, do not try a different name. The same
+cannot be queried; each result carries 'kind', 'runnable' (will this server run
+it) and 'documented' (did the operator record notes for it). Read what one does
+with help{name, type} before anything else. 'runnable: false' means this server
+will not run it -- report that, do not try a different name. The same
 name can be a screen, a report AND a procedure (FORMMSG is all three).`,
       inputSchema: searchScreensShape,
     },
     handler("search_screens", async (args) => {
-      const result = (await searchScreens(ctx.dict, args, glossary, examples, runnableNames())) as Record<
-        string,
-        unknown
-      >;
+      const result = (await searchScreens(ctx.dict, args, glossary, examples, {
+        catalogued: runnableNames(),
+        policy: programPolicy,
+      })) as Record<string, unknown>;
       // Skills authored in Priority, when the installation lets us read them.
       // Cached for ten minutes including a refusal, so this costs nothing on an
       // installation where the screen is closed.
@@ -991,8 +992,26 @@ running them.`,
     if (reply.output && reply.output.length > 0) return {};
     if (!reply.messages.length) return {};
     const twin = reply.twin;
+    // Priority says "no rows" with a message of type 'error', which this server
+    // turned into status:'error' -- and a model relayed "the report failed" for a
+    // report that ran perfectly and simply had nothing to show. The status is
+    // corrected to 'no_data' when the messages say that and only that, so a real
+    // failure still reads as one.
+    const said = reply.messages.join(" ").toLowerCase();
+    const emptyPhrases = ["no values in report", "no data", "אין נתונים", "לא נמצאו נתונים"];
+    const looksEmpty = emptyPhrases.some((phrase) => said.includes(phrase));
     return {
       producedNoOutput: true,
+      ...(looksEmpty && reply.status === "error"
+        ? {
+            status: "no_data",
+            originalStatus: "error",
+            statusNote:
+              "Priority reports an empty result as a message of type 'error'; this ran to " +
+              "completion with nothing to show, so the status is corrected to 'no_data'. " +
+              "The unchanged Priority messages are in 'messages'.",
+          }
+        : {}),
       note:
         `The program ran and produced no output. Priority's own words are in 'messages' -- ` +
         `relay them; a message like "No values in report" means the run succeeded and there ` +
@@ -1046,8 +1065,15 @@ procedure act, so guessing them is how you run something you did not intend.
 A parameter you do not mention KEEPS its defaultValue -- it is not blanked.
 
 Status values: 'needs_input' (parameters listed, nothing ran), 'would_run',
-'completed', 'message' (Priority said something -- read 'messages'),
+'completed', 'no_data', 'message' (Priority said something -- read 'messages'),
 'not_found' (no such program), 'unmatched_inputs', 'needs_choice', 'error'.
+
+'no_data' means the program RAN and there was nothing to show. Priority reports
+that as a message of type 'error', so the status is corrected here; say the
+report is empty, not that it failed. 'producedNoOutput' is set, 'originalStatus'
+records what Priority said, and a 'twin' -- the same name of the other kind --
+is worth checking, since a report is often only a view of what its procedure
+twin prepares.
 
 'would_run' means the PROCEDURE takes no parameters at all, so there was nothing
 to report and nothing was run -- it would have started acting immediately. Say

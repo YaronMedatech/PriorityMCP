@@ -163,7 +163,8 @@ export const searchScreensShape = {
       "What to search: F screens (the default, and the only kind unless you say " +
         "otherwise), P procedures, R reports. Pass ['P','R'] to find a program by " +
         "its Hebrew title, or ['F','P','R'] for everything. Programs are described " +
-        "with help{type} and can only be RUN if 'runnable' is true.",
+        "with help{name, type} and carry 'runnable' saying whether this server " +
+        "will run them.",
     ),
 };
 
@@ -178,8 +179,19 @@ export async function searchScreens(
   },
   glossary?: Glossary,
   examples?: Examples,
-  /** Upper-cased names of the programs the operator's catalog allows to run. */
-  runnable: Set<string> = new Set(),
+  /**
+   * Which programs this server will run, and why.
+   *
+   * `catalogued` is the operator's list; `policy` says whether that list is the
+   * LIMIT. Passing only the list was wrong once the policy could be opened: with
+   * PRIORITY_ALLOW_ALL_PROGRAMS every program is runnable, yet every result said
+   * `runnable: false` because it was not catalogued -- so a model could read
+   * "cannot be run" about a program run_program would happily run.
+   */
+  programs: { catalogued: Set<string>; policy: "catalog" | "all" } = {
+    catalogued: new Set(),
+    policy: "catalog",
+  },
 ): Promise<unknown> {
   await dict.ready();
   // includeUnpublished is the former name of this flag. Still honoured so a
@@ -196,24 +208,40 @@ export async function searchScreens(
   // Programs carry one more fact than screens: whether this server may run them.
   // Priority has no way to enumerate runnable programs, so the catalog is the
   // operator's decision, and a program outside it can be read about but not run.
-  const matches = result.matches.map((m) =>
-    m.kind === "F"
-      ? m
-      : {
-          ...m,
-          runnable: runnable.has(m.screen.toUpperCase()),
-          ...(runnable.has(m.screen.toUpperCase())
-            ? {}
-            : { catalogNote: "Not in programs.json — describable with help, not runnable here." }),
-        },
-  );
+  const openPolicy = programs.policy === "all";
+  const matches = result.matches.map((m) => {
+    if (m.kind === "F") return m;
+    const catalogued = programs.catalogued.has(m.screen.toUpperCase());
+    return {
+      ...m,
+      // Runnable means "this server will run it", not "it is documented".
+      runnable: catalogued || openPolicy,
+      ...(catalogued
+        ? { documented: true as const }
+        : openPolicy
+          ? {
+              documented: false as const,
+              catalogNote:
+                "Runnable, but not in programs.json — nothing is recorded here about what " +
+                "it does. Read help{name, type} first, and for a procedure ask the user.",
+            }
+          : {
+              documented: false as const,
+              catalogNote: "Not in programs.json, so this server will not run it.",
+            }),
+    };
+  });
   const programsShown = matches.filter((m) => m.kind !== "F").length;
   if (programsShown) {
     notes.push(
       `${programsShown} of these are programs (kind P = procedure, R = report), not screens. ` +
         `They cannot be queried. Read what one does with help{name, type}. ` +
-        `'runnable: true' means run_program accepts it; otherwise the operator must ` +
-        `add it to programs.json first -- say so rather than trying another name. ` +
+        (openPolicy
+          ? `This server runs ANY procedure or report, so 'runnable' is true throughout; ` +
+            `'documented: false' means the operator recorded no notes for it, which makes ` +
+            `reading help and asking the user before a procedure your responsibility. `
+          : `'runnable: true' means run_program accepts it; false means the operator must ` +
+            `add it to programs.json first -- say so rather than trying another name. `) +
         `A name can exist as several kinds; pass the kind letter you mean.`,
     );
   }

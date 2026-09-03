@@ -32,8 +32,8 @@ export interface ReadinessReport {
     glossaryTerms: number;
     /** Procedures and reports known from EXEC. */
     programs: number;
-    /** Of those, how many the operator's catalog allows this server to run. */
-    runnablePrograms: number;
+    /** Of those, how many carry the operator's notes in programs.json. */
+    documentedPrograms: number;
   };
   issues: ReadinessIssue[];
   notes: string[];
@@ -166,20 +166,20 @@ export function buildReadiness(
   // 6. Programs the model can find but this server cannot run. Not a defect --
   //    the catalog is deliberately small -- but a model that finds the right
   //    report and then cannot run it should be able to say why.
-  const runnableHere = programs.filter((p) => runnable.has(p.screen.toUpperCase()));
+  const documented = programs.filter((p) => runnable.has(p.screen.toUpperCase()));
   if (programs.length) {
-    const uncatalogued = programs.length - runnableHere.length;
     issues.push({
       kind: "uncatalogued-programs",
       severity: "low",
-      count: uncatalogued,
+      count: programs.length - documented.length,
       detail:
-        `${programs.length} procedures and reports are searchable by title; ${runnableHere.length} ` +
-        `are in programs.json and can be run. The rest can be described (help) but not executed.`,
+        `${programs.length} procedures and reports are searchable by title; ${documented.length} ` +
+        `are documented in programs.json with the operator's own notes. Whether the rest can be ` +
+        `RUN depends on PRIORITY_ALLOW_ALL_PROGRAMS — read 'scope' from list_programs.`,
       fix:
-        "This is by design: Priority cannot enumerate runnable programs, so the operator " +
-        "lists them. Add a program to programs.json when a user needs it run.",
-      examples: runnableHere.slice(0, MAX_EXAMPLES).map((p) => `${p.screen} (${p.kind}) — runnable`),
+        "Priority cannot enumerate runnable programs over the API, so the operator lists the " +
+        "ones worth documenting. Add a program to programs.json to attach notes to it.",
+      examples: documented.slice(0, MAX_EXAMPLES).map((p) => `${p.screen} (${p.kind}) — documented`),
     });
   }
 
@@ -205,7 +205,7 @@ export function buildReadiness(
       withHebrewTitle: titled.length,
       glossaryTerms: terms.length,
       programs: programs.length,
-      runnablePrograms: runnableHere.length,
+      documentedPrograms: documented.length,
     },
     issues: issues.sort((a, b) => rank(b.severity) - rank(a.severity)),
     notes,
