@@ -124,6 +124,8 @@ OData:
 | `AIWORKFLOWS` ("AI סקילז") is in the service document yet answers **400 "לא ניתן להפעיל API למסך זה"** in every company | Skills exist as a feature; reading them needs the screen opened for the API or the API user given the "תחזוקת מערכת" module. `list_skills` says so. |
 | On Priority's cloud the Web SDK URL is **`https://<host>/wcf/service.svc`** (one `wcf`, per Priority's SDK docs), not the `<host>/wcf/wcf/Service.svc` the SDK derives from a host root — that one answers **403**. The **PAT logs in** as `username=<token>, password='PAT'`; the named user was refused. | `loadWebSdkConfig` derives the cloud URL for `*.priority-connect.online` and prefers the PAT, so OData and programs act as one identity. Measured end to end: `FORMTRIGREP(ORDERS)` returned 60,000 characters of trigger source. |
 | The cloud web UI itself authenticates with **OIDC** (`<host>/auth/`, scope `wcf_api`) and no password grant exists; Basic user/password on OData answers **401** for a valid web user. | Per-caller identities on the cloud are PATs (`X-Priority-Token`), not passwords. The SDK also accepts an OIDC `accessToken` (`oidc_jwt`) should a client credential ever be issued. |
+| A self-hosted installation's OData certificate is typically **self-signed**, and Node does not read the Windows trust store — so a certificate the whole domain trusts still fails there. Measured 2026-09-04 on `tattest.tat.local`: exporting the server's own certificate to PEM and pointing `PRIORITY_CA_BUNDLE` at it **works**, even though the certificate carries no `basicConstraints` and is a leaf rather than a CA. | Pinning the server's own certificate is the answer for a self-signed one, as `tlsHelp()` in `odata.ts` says. The contrary claim in `scripts/make-cert.ps1` — that Node cannot accept a self-signed leaf however it is supplied — does not hold for the `ca:` option this uses. `PRIORITY_VERIFY_SSL=0` stays the fallback, not the first move. |
+| On a self-hosted installation `EFORM`, `EXEC`, `EREP`, `EPROG` and `ENVIRONMENT` are **listed in the service document and still answer 400** until the API user is granted them — while `AINVOICES` and 2,159 other sets read fine with the same credentials | The 400 is a permission as often as a screen flag, and the two are indistinguishable in the response. Without `EFORM` the dictionary cannot be built at all, so `scripts/check-dictionary.ts` gates a deployment on it rather than on the sales-screen probe. |
 | `TABTITLES`, `COLTITLES`, `TITLES`, `COLUMNS`, `FREPORTS`, `PROGDESIGN` → 400; `APPS`/`APP` → 404 | `EFORM` is the only channel for screen titles, and `programs.json` has to be maintained by hand because programs cannot be enumerated. |
 
 The dictionary comes from `EFORM` (~5,800 forms) and is cached on disk for 24 hours,
@@ -191,14 +193,24 @@ On Windows, verifying with `curl` needs `--ssl-revoke-best-effort`: curl there u
 schannel, which requires a revocation source, and a private CA publishes no CRL. The
 flag relaxes the revocation check only. Node-based clients do not need it.
 
+**Verify with `curl`, not with `Invoke-WebRequest`.** Measured 2026-09-04 against a
+running listener: a raw `SslStream` handshakes with it happily — TLS 1.3, AES256 —
+and `Invoke-WebRequest` against the same URL fails with `The underlying connection
+was closed: An unexpected error occurred on a send`, under forced TLS 1.2 and under
+`SystemDefault` alike, with certificate validation bypassed either way. The .NET
+Framework HTTP stack does not get along with this Node listener. Nothing is wrong
+with the server or the certificate when that happens, and both `install-ca.ps1` and
+the bootstrap's health check used to report a working server as unreachable because
+of it — both now use `curl`, which answers correctly.
+
 ---
 
 ## Tests
 
 ```powershell
 npm run typecheck
-npm test                          # 8 offline suites -- no server, no Priority
-npm run test:live                 # 11 suites against the real installation
+npm test                          # 14 offline suites -- no server, no Priority
+npm run test:live                 # 15 suites against the real installation
 npx tsx tests/live.http.ts        # the HTTP transport, as a remote client
 npx tsx tests/live.headerauth.ts  # all four accepted and four refused auth paths
 ```

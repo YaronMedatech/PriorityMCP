@@ -66,14 +66,21 @@ Write-Host "SAN extension: $($sanParts -join ', ')"
 # A small CA that signs the server certificate, rather than one self-signed
 # certificate doing both jobs.
 #
-# A self-signed LEAF cannot be a trust anchor: it carries CA:FALSE, so clients
-# refuse to build a chain to it even when it is explicitly supplied as trusted.
-# Node reports DEPTH_ZERO_SELF_SIGNED_CERT and there is no way to accept it short
-# of disabling verification, which would defeat the point. Two certificates cost
-# one extra step and behave the way every client already expects.
+# The reason is ROTATION, not necessity: reissue the server certificate from the
+# same CA and no client has to be touched again, where replacing a bare
+# self-signed certificate means re-installing it on every client machine. Two
+# certificates cost one extra step here and behave the way every client already
+# expects.
 #
-# It also makes rotation cheap: reissue the server certificate from the same CA
-# and no client has to be touched again.
+# An earlier version of this comment claimed a self-signed LEAF cannot be a trust
+# anchor at all -- that it carries CA:FALSE, so Node reports
+# DEPTH_ZERO_SELF_SIGNED_CERT and there is no way to accept it short of disabling
+# verification. That is too strong, and measured 2026-09-04 it is wrong for the
+# way this project supplies a certificate: Priority's own self-signed server
+# certificate, exported to PEM and passed as Node's `ca:` option through
+# PRIORITY_CA_BUNDLE, validates -- and it carries no basicConstraints at all.
+# OpenSSL accepts a self-signed certificate found in its trust store as an anchor.
+# So the CA below is the better shape, not the only workable one.
 $ca = New-SelfSignedCertificate `
   -Subject "CN=priority-mcp local CA" `
   -CertStoreLocation "Cert:\CurrentUser\My" `
