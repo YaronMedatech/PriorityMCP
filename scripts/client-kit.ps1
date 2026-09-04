@@ -50,12 +50,27 @@ Write-Host 'CA installed.' -ForegroundColor Green
 
 # Verify before configuring anything: this separates a trust problem from a
 # config problem, and the two produce very similar-looking failures.
-try {
-  `$r = Invoke-WebRequest -Uri 'https://${ServerAddress}:${Port}/health' -TimeoutSec 10 -UseBasicParsing
-  Write-Host "Server reachable and trusted: `$(`$r.Content)" -ForegroundColor Green
-} catch {
-  Write-Host "Could not reach the server: `$(`$_.Exception.Message)" -ForegroundColor Red
-  Write-Host 'Check that the server is running and that port ${Port} is open.'
+#
+# curl, NOT Invoke-WebRequest. Measured against the real listener: a raw
+# SslStream handshakes fine (TLS 1.3, AES256) while Invoke-WebRequest fails with
+# "The underlying connection was closed: An unexpected error occurred on a
+# send", on forced TLS 1.2 and on SystemDefault alike. The .NET Framework HTTP
+# stack does not get along with this Node listener, so using it here would tell
+# every client that a working server is unreachable.
+#
+# --ssl-revoke-best-effort is required on WINDOWS and is NOT a way of skipping
+# verification: curl there uses schannel, which insists on a revocation source,
+# and this private CA publishes no CRL. The signature and the host name are
+# still checked. The CA is passed explicitly, so this verifies trust too.
+# curl needs the PEM; Import-Certificate above needed the DER .cer. Both ship here.
+`$pem = Join-Path `$PSScriptRoot 'mcp-ca.pem'
+`$out = & curl.exe --silent --show-error --max-time 15 ``
+  --cacert `$pem --ssl-revoke-best-effort 'https://${ServerAddress}:${Port}/health' 2>&1
+if (`$out -match '"ok"\s*:\s*true') {
+  Write-Host "Server reachable and trusted: `$out" -ForegroundColor Green
+} else {
+  Write-Host "Could not reach the server: `$out" -ForegroundColor Red
+  Write-Host 'Check that the server is running and that port ${Port} is open on it.'
 }
 "@
 Set-Content -Path (Join-Path $OutDir "install-ca.ps1") -Value $install -Encoding ASCII
