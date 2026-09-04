@@ -19,3 +19,7 @@ unit-*.json
 service/*.exe
 service/logs/
 client-kit/
+
+# Written by scripts/bootstrap-server.ps1: records that this machine already got
+# its own bearer token, so a re-run does not rotate it and break the client kits.
+.bootstrap-token-provisioned
