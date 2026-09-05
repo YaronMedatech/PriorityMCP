@@ -76,6 +76,36 @@ export interface ScreenEntry {
    * kind is part of the identity, not a label on it.
    */
   kind: "F" | "P" | "R";
+  /**
+   * How a Priority USER can reach this program, from the generator screens' own
+   * link sub-forms: EREP's REPMENU / REPPROG / REPDOC, EPROG's PROGMENU /
+   * PROGPROG.
+   *
+   * `undefined` means the question could not be asked -- EREP or EPROG was not
+   * readable -- and is emphatically NOT the same as `[]`, which means Priority
+   * links it from nowhere. Filtering on the two as though they were the same
+   * would hide every program on an installation that simply keeps those screens
+   * closed, which is the state this one was in until an operator opened them.
+   *
+   * Measured here: 97.5% of reports carry at least one link and 90.7% of
+   * procedures do. The remainder are reachable from no menu, no program and no
+   * document, so no Priority user can run them from the UI at all.
+   */
+  reachableFrom?: ("menu" | "program" | "document")[];
+  /**
+   * EPROG.RS, verbatim, for procedures.
+   *
+   * 'R' is Priority's own marker for a procedure that IS A REPORT rather than an
+   * action -- 35% of the 5,300 here. That distinction matters more than it
+   * looks: the program tools warn that a procedure can change, post or delete
+   * data, and for a third of them that warning is simply false.
+   *
+   * Every other value is passed through UNINTERPRETED. The codes 'd', 'N', 'G',
+   * 'M', 'p', 'E', 'F', 'l' and 'S' all occur here and nobody has said what they
+   * mean, so this server does not guess -- inferring meaning from a code is the
+   * mistake the whole design exists to prevent.
+   */
+  rs?: string;
 }
 
 export interface SearchResult {
@@ -154,6 +184,33 @@ function stemHebrew(value: string): string {
     .join(" ");
 }
 
+/** One program's link summary, as trimmed for the cache. */
+interface LinkRow {
+  ENAME: string;
+  rs?: string;
+  via: ("menu" | "program" | "document")[];
+}
+
+interface LinkRows {
+  reports: LinkRow[];
+  procedures: LinkRow[];
+  /** Which generator screen answered. A screen that did not is unknown, not empty. */
+  asked: { R: boolean; P: boolean };
+}
+
+/** Which of the named sub-forms carried at least one row. */
+function linkKinds(
+  row: Record<string, unknown>,
+  pairs: [string, "menu" | "program" | "document"][],
+): ("menu" | "program" | "document")[] {
+  const out: ("menu" | "program" | "document")[] = [];
+  for (const [nav, kind] of pairs) {
+    const rows = row[nav];
+    if (Array.isArray(rows) && rows.length > 0) out.push(kind);
+  }
+  return out;
+}
+
 interface IndexedEntry extends ScreenEntry {
   /** Pre-normalized haystack, built once at load rather than per search. */
   haystack: string;
@@ -199,7 +256,7 @@ export class PriorityDictionary {
     // loading the real installation the moment a live run refreshed it.
     const cached = this.opts.cache === false ? null : readCache(installationBase());
     if (cached) {
-      this.ingest(cached.sets, cached.forms, cached.programs);
+      this.ingest(cached.sets, cached.forms, cached.programs, cached.links);
       process.stderr.write(
         `[priority-mcp] dictionary from cache (${cached.forms.length} forms, ` +
           `${cached.programs.length} programs, age ${Math.round(cached.ageMs / 3600_000)}h)\n`,
@@ -222,7 +279,23 @@ export class PriorityDictionary {
     //
     // EXEC is filtered to P and R with chained `or`, not `in`: this server refuses
     // `in` (HTTP 403). Measured: 9,229 rows, every one titled, in ~6 seconds.
-    const [sets, raw, exec] = await Promise.all([
+    // EREP and EPROG carry the link sub-forms that say whether a Priority USER
+    // can reach a program at all, and EPROG carries RS. Both are optional in the
+    // same way EXEC is: a closed screen costs the enrichment, never the
+    // dictionary. pageSize is 200 rather than 500 because these rows carry
+    // expands; and there is no parent $select for the reason EFORM has none --
+    // measured on this installation too, that combination closes the connection
+    // mid-response rather than returning a short row.
+    const linkQuery = (entity: string, expand: string) =>
+      this.client.query(entity, { expand, pageSize: 200 }).catch((err: unknown) => {
+        process.stderr.write(
+          `[priority-mcp] ${entity} not readable, so no program can be told apart from ` +
+            `an unreachable one: ${err instanceof Error ? (err.message.split("\n")[0] ?? "") : String(err)}\n`,
+        );
+        return null;
+      });
+
+    const [sets, raw, exec, erep, eprog] = await Promise.all([
       this.client.entitySets(),
       this.client.query("EFORM", {
         expand: "FLINK_SUBFORM($select=FNAME)",
@@ -243,6 +316,11 @@ export class PriorityDictionary {
           );
           return [] as Record<string, unknown>[];
         }),
+      linkQuery(
+        "EREP",
+        "REPMENU_SUBFORM($select=ENAME),REPPROG_SUBFORM($select=ENAME),REPDOC_SUBFORM($select=ENAME)",
+      ),
+      linkQuery("EPROG", "PROGMENU_SUBFORM($select=ENAME),PROGPROG_SUBFORM($select=ENAME)"),
     ]);
 
     const programs = exec.map((r) => ({
@@ -251,6 +329,33 @@ export class PriorityDictionary {
       TITLE: r["TITLE"],
       MODULENAME: r["MODULENAME"],
     }));
+
+    // Trimmed to the two facts that are used, so the cache stays small: which
+    // kinds of link exist, and RS. null when the screen was unreadable, which
+    // ingest() must keep telling apart from "linked from nowhere".
+    const links: LinkRows | null =
+      erep === null && eprog === null
+        ? null
+        : {
+            reports: (erep ?? []).map((r) => ({
+              ENAME: str(r["ENAME"]) ?? "",
+              via: linkKinds(r, [
+                ["REPMENU_SUBFORM", "menu"],
+                ["REPPROG_SUBFORM", "program"],
+                ["REPDOC_SUBFORM", "document"],
+              ]),
+            })),
+            procedures: (eprog ?? []).map((r) => ({
+              ENAME: str(r["ENAME"]) ?? "",
+              rs: str(r["RS"]) ?? undefined,
+              via: linkKinds(r, [
+                ["PROGMENU_SUBFORM", "menu"],
+                ["PROGPROG_SUBFORM", "program"],
+              ]),
+            })),
+            /** Which generator screens actually answered. */
+            asked: { R: erep !== null, P: eprog !== null },
+          };
 
     // Trim before caching: the un-selectable parent row carries every EFORM
     // column, which is a large amount of mostly-unused JSON on disk otherwise.
@@ -269,11 +374,19 @@ export class PriorityDictionary {
         `(${forms.length} forms, ${programs.length} programs)\n`,
     );
 
-    this.ingest(sets, forms, programs);
-    if (this.opts.cache !== false) writeCache(installationBase(), sets, forms, programs);
+    this.ingest(sets, forms, programs, links);
+    if (this.opts.cache !== false) writeCache(installationBase(), sets, forms, programs, links);
   }
 
-  private ingest(sets: string[], forms: Record<string, unknown>[], programs: Record<string, unknown>[]): void {
+  private ingest(
+    sets: string[],
+    forms: Record<string, unknown>[],
+    programs: Record<string, unknown>[],
+    links: LinkRows | null,
+  ): void {
+    const byName = (rows: LinkRow[]) => new Map(rows.map((r) => [r.ENAME.toUpperCase(), r]));
+    const reportLinks = links ? byName(links.reports) : null;
+    const procLinks = links ? byName(links.procedures) : null;
     const published = new Set(sets);
     this.entitySetCount = sets.length;
 
@@ -282,8 +395,8 @@ export class PriorityDictionary {
     for (const row of forms) {
       const parent = str(row["ENAME"]);
       if (!parent) continue;
-      const links = Array.isArray(row["FLINK_SUBFORM"]) ? row["FLINK_SUBFORM"] : [];
-      for (const link of links) {
+      const childLinks = Array.isArray(row["FLINK_SUBFORM"]) ? row["FLINK_SUBFORM"] : [];
+      for (const link of childLinks) {
         const child = str((link as Record<string, unknown>)["FNAME"]);
         if (!child || child === parent) continue;
         const list: string[] = this.childToParents.get(child) ?? [];
@@ -360,6 +473,12 @@ export class PriorityDictionary {
       if (!name || (type !== "P" && type !== "R")) continue;
       const title = str(row["TITLE"]);
       const module = str(row["MODULENAME"]);
+      // A program the generator screen never mentioned is UNKNOWN, not
+      // unreachable: EREP and EPROG are system-maintenance screens and an
+      // installation may simply keep them shut. Only a screen that answered
+      // licenses the empty array.
+      const asked = type === "R" ? links?.asked.R : links?.asked.P;
+      const link = (type === "R" ? reportLinks : procLinks)?.get(name.toUpperCase());
       const entry: IndexedEntry = {
         screen: name,
         title,
@@ -368,6 +487,8 @@ export class PriorityDictionary {
         published: false,
         access: "program",
         kind: type,
+        ...(asked ? { reachableFrom: link?.via ?? [] } : {}),
+        ...(type === "P" && link?.rs ? { rs: link.rs } : {}),
         haystack: normalize([name, title, module].filter(Boolean).join(" ")),
         normScreen: normalize(name),
         normTitle: normalize(title ?? ""),
@@ -450,10 +571,21 @@ export class PriorityDictionary {
    */
   search(
     query: string,
-    opts: { limit?: number; onlyReadable?: boolean; kinds?: ("F" | "P" | "R")[] } = {},
+    opts: {
+      limit?: number;
+      onlyReadable?: boolean;
+      onlyReachable?: boolean;
+      kinds?: ("F" | "P" | "R")[];
+    } = {},
   ): SearchResult {
     const limit = Math.min(Math.max(opts.limit ?? 25, 1), 200);
     const onlyReadable = opts.onlyReadable !== false;
+    // Programs no Priority user can reach are hidden by default. A report or
+    // procedure linked from no menu, no program and no document cannot be run
+    // from the UI at all, so offering it to a model is offering something the
+    // business does not actually have. Measured here: 2.5% of reports and 9.3%
+    // of procedures.
+    const onlyReachable = opts.onlyReachable !== false;
     // Screens only by default. Programs were added to the index later, and a
     // caller who learned the tool as a screen search must keep getting exactly
     // the results it got before -- 9,229 programs would otherwise dilute every
@@ -466,7 +598,13 @@ export class PriorityDictionary {
     // so filtering on `published` hid child screens completely and a caller
     // searching for one was told it did not exist.
     const pool = this.entries.filter(
-      (e) => kinds.has(e.kind) && (!onlyReadable || e.access !== "unavailable"),
+      (e) =>
+        kinds.has(e.kind) &&
+        (!onlyReadable || e.access !== "unavailable") &&
+        // `undefined` survives on purpose: it means EREP or EPROG could not be
+        // read, so nothing is known either way. Only a program the generator
+        // screen ANSWERED for, with no links at all, is filtered out.
+        (!onlyReachable || e.reachableFrom === undefined || e.reachableFrom.length > 0),
     );
 
     if (!q) {
@@ -526,7 +664,7 @@ export class PriorityDictionary {
 
 /** Drop the internal index fields before handing entries to a caller. */
 function strip(entries: IndexedEntry[]): ScreenEntry[] {
-  return entries.map(({ screen, title, table, module, published, access, parents, kind }) => ({
+  return entries.map(({ screen, title, table, module, published, access, parents, kind, reachableFrom, rs }) => ({
     screen,
     title,
     table,
@@ -535,6 +673,8 @@ function strip(entries: IndexedEntry[]): ScreenEntry[] {
     access,
     ...(parents ? { parents } : {}),
     kind,
+    ...(reachableFrom ? { reachableFrom } : {}),
+    ...(rs ? { rs } : {}),
   }));
 }
 
@@ -580,30 +720,41 @@ interface CacheFile {
   // rows, so every child screen would silently look `unavailable` until the TTL
   // expired. Bumped to 3 when procedures and reports were added from EXEC: a v2
   // cache has no programs, so a search for them would find nothing for a day.
-  version: 3;
+  // Bumped to 4 when EREP/EPROG reachability and RS arrived: a v3 cache knows
+  // neither, and reading one would leave every program looking unreachable for
+  // a day -- which is exactly the confusion `reachableFrom: undefined` exists to
+  // prevent, arriving instead through the back door of a stale file.
+  version: 4;
   fetchedAt: number;
   /** Which installation this was fetched from -- another one's cache is wrong. */
   source: string;
   sets: string[];
   forms: Record<string, unknown>[];
   programs: Record<string, unknown>[];
+  links: LinkRows | null;
 }
 
 function readCache(
   sourceUrl: string,
-): { sets: string[]; forms: Record<string, unknown>[]; programs: Record<string, unknown>[]; ageMs: number } | null {
+): {
+  sets: string[];
+  forms: Record<string, unknown>[];
+  programs: Record<string, unknown>[];
+  links: LinkRows | null;
+  ageMs: number;
+} | null {
   try {
     const file = cacheFileFor(sourceUrl);
     if (!fs.existsSync(file)) return null;
     const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as CacheFile;
-    if (parsed.version !== 3) return null;
+    if (parsed.version !== 4) return null;
     // Keyed to the connection: pointing .env at another installation must not
     // serve that installation's screen names.
     if (parsed.source !== sourceUrl) return null;
     const ageMs = Date.now() - parsed.fetchedAt;
     if (ageMs > CACHE_TTL_MS || ageMs < 0) return null;
     if (!Array.isArray(parsed.sets) || !Array.isArray(parsed.forms) || !Array.isArray(parsed.programs)) return null;
-    return { sets: parsed.sets, forms: parsed.forms, programs: parsed.programs, ageMs };
+    return { sets: parsed.sets, forms: parsed.forms, programs: parsed.programs, links: parsed.links ?? null, ageMs };
   } catch {
     // A corrupt cache must never break startup -- refetching is always correct.
     return null;
@@ -615,15 +766,17 @@ function writeCache(
   sets: string[],
   forms: Record<string, unknown>[],
   programs: Record<string, unknown>[],
+  links: LinkRows | null,
 ): void {
   try {
     const payload: CacheFile = {
-      version: 3,
+      version: 4,
       fetchedAt: Date.now(),
       source: sourceUrl,
       sets,
       forms,
       programs,
+      links,
     };
     fs.writeFileSync(cacheFileFor(sourceUrl), JSON.stringify(payload), "utf8");
   } catch {

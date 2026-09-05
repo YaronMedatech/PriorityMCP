@@ -44,6 +44,20 @@ export interface ResolvedProgram {
   catalogEntry?: CatalogEntry;
   /** Present when nothing is documented about this program here. */
   caution?: string;
+  /**
+   * True for a report, and for a PROCEDURE Priority marks as one with
+   * EPROG.RS='R'. The second half is what makes this worth carrying: the
+   * program tools warn that a procedure can change data, and on the
+   * installation this was measured against a third of them are reports, for
+   * which that warning is false and discourages a harmless read.
+   */
+  reportLike?: boolean;
+  /**
+   * How a Priority user reaches it: menu, program, document. An empty array
+   * means nothing links to it, so no one can run it from the UI -- worth saying
+   * before running it here. Absent means EREP/EPROG could not be read.
+   */
+  reachableFrom?: ("menu" | "program" | "document")[];
 }
 
 export interface ProgramCandidate {
@@ -118,11 +132,14 @@ export function resolveProgram(
   const known = opts.dict.getProgram(wanted, opts.type);
 
   if (catalogued && (!opts.type || catalogued.type === opts.type)) {
+    const known0 = opts.dict.getProgram(catalogued.name, catalogued.type)[0];
     return {
       name: catalogued.name,
       type: catalogued.type,
-      title: opts.dict.getProgram(catalogued.name, catalogued.type)[0]?.title ?? null,
+      title: known0?.title ?? null,
       source: "catalog",
+      reportLike: catalogued.type === "R" || known0?.rs === "R",
+      ...(known0?.reachableFrom ? { reachableFrom: known0.reachableFrom } : {}),
       catalogEntry: catalogued,
       ...twinOf(catalogued.name, catalogued.type, opts.dict),
     };
@@ -177,6 +194,8 @@ export function resolveProgram(
     type: entry.kind as "P" | "R",
     title: entry.title,
     source: "dictionary",
+    reportLike: entry.kind === "R" || entry.rs === "R",
+    ...(entry.reachableFrom ? { reachableFrom: entry.reachableFrom } : {}),
     ...twinOf(entry.screen, entry.kind, opts.dict),
     caution:
       `This program is NOT in the operator's catalog, so nothing is recorded here about ` +

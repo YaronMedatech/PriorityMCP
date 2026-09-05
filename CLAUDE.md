@@ -18,7 +18,7 @@ is the code that runs.
 
 ```powershell
 npm run typecheck                 # tsc --noEmit. Run this before restarting the service.
-npm test                          # 15 offline suites -- no server, no Priority
+npm test                          # 16 offline suites -- no server, no Priority
 npm run test:live                 # 15 suites against the real installation
 npx tsx tests/live.http.ts        # the HTTP transport, as a remote client
 npx tsx tests/live.headerauth.ts  # all four accepted and four refused auth paths
@@ -136,6 +136,18 @@ in `README.md`; these are the ones that break code silently.
   negative result from an expand here proves nothing. And the statuses are **inverted**:
   an entity that exists with no help answers 404 (an answer), a name that does not exist
   answers 200 with zero rows.
+- **A program the model may see is one a Priority USER can reach.** EREP's
+  `REPMENU`/`REPPROG`/`REPDOC` and EPROG's `PROGMENU`/`PROGPROG` say how; linked from
+  none of them, nobody can run it from the UI, and `search_screens` hides it. The
+  third state is the one to protect: `reachableFrom: undefined` means EREP/EPROG
+  could not be READ, and treating that as "unreachable" would hide every program on
+  an installation that keeps those screens closed — which is the state this one was
+  in until an operator opened them.
+- **`EPROG.RS='R'` marks a PROCEDURE that is really a report** — a third of them.
+  The program tools warn that a procedure can change, post or delete data, and for
+  those that warning is false. Only `R` is interpreted; `d`, `N`, `G`, `M`, `p`,
+  `E`, `F`, `l` and `S` also occur and are passed through uninterpreted, because
+  nobody has said what they mean.
 - **`published: false` is a hint in both directions, never a guarantee.** The service
   document under-reports. `ScreenEntry.access` (`direct` / `via-parent` / `unavailable`
   / `program`) is what callers act on; `published` alone made a sub-form look identical

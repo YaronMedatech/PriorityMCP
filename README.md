@@ -217,7 +217,7 @@ of it — both now use `curl`, which answers correctly.
 
 ```powershell
 npm run typecheck
-npm test                          # 15 offline suites -- no server, no Priority
+npm test                          # 16 offline suites -- no server, no Priority
 npm run test:live                 # 15 suites against the real installation
 npx tsx tests/live.http.ts        # the HTTP transport, as a remote client
 npx tsx tests/live.headerauth.ts  # all four accepted and four refused auth paths

@@ -163,6 +163,15 @@ export const searchScreensShape = {
         "default — this flag only adds screens that genuinely cannot be read, " +
         "which is useful to confirm a screen exists at all.",
     ),
+  includeUnreachable: z
+    .boolean()
+    .optional()
+    .describe(
+      "Also return programs that no Priority user can reach: linked from no " +
+        "menu, no program and no document. Default false. They exist in the " +
+        "installation and cannot be run from its UI at all, so they are hidden " +
+        "unless you are specifically auditing what is orphaned.",
+    ),
   kinds: z
     .array(z.enum(["F", "P", "R"]))
     .optional()
@@ -182,6 +191,7 @@ export async function searchScreens(
     limit?: number;
     includeUnavailable?: boolean;
     includeUnpublished?: boolean;
+    includeUnreachable?: boolean;
     kinds?: ("F" | "P" | "R")[];
   },
   glossary?: Glossary,
@@ -208,6 +218,7 @@ export async function searchScreens(
     ...(input.limit === undefined ? {} : { limit: input.limit }),
     ...(input.kinds?.length ? { kinds: input.kinds } : {}),
     onlyReadable: !wantAll,
+    onlyReachable: input.includeUnreachable !== true,
   });
 
   const notes: string[] = [];
@@ -219,8 +230,32 @@ export async function searchScreens(
   const matches = result.matches.map((m) => {
     if (m.kind === "F") return m;
     const catalogued = programs.catalogued.has(m.screen.toUpperCase());
+    // Priority's own P/R split is not the whole story. EPROG.RS='R' marks a
+    // PROCEDURE that is really a report -- 35% of them on the installation this
+    // was measured against -- and the difference decides whether running it is a
+    // read or an act. Only 'R' is interpreted; every other code is handed over
+    // as Priority stores it, because nobody has said what the others mean.
+    const reportLike = m.kind === "R" || m.rs === "R";
     return {
       ...m,
+      ...(m.kind === "P" && m.rs === "R"
+        ? {
+            actuallyAReport: true as const,
+            rsNote:
+              "EPROG.RS='R': Priority classifies this PROCEDURE as a report. Running it " +
+              "renders output rather than changing data, so the standard warning about " +
+              "procedures does not apply to this one.",
+          }
+        : {}),
+      ...(m.kind === "P" && m.rs && m.rs !== "R"
+        ? {
+            rsNote:
+              `EPROG.RS='${m.rs}', which is Priority's own classification code. This server ` +
+              `does not know what it means and will not guess -- treat this as an ordinary ` +
+              `procedure, which can change data.`,
+          }
+        : {}),
+      reportLike,
       // Runnable means "this server will run it", not "it is documented".
       runnable: catalogued || openPolicy,
       ...(catalogued
@@ -250,6 +285,22 @@ export async function searchScreens(
           : `'runnable: true' means run_program accepts it; false means the operator must ` +
             `add it to programs.json first -- say so rather than trying another name. `) +
         `A name can exist as several kinds; pass the kind letter you mean.`,
+    );
+    notes.push(
+      "'reachableFrom' says how a Priority USER reaches each program -- from a menu, " +
+        "from another program, or as a document. Programs linked from NONE of the three " +
+        "are hidden by default: they exist in the installation and cannot be run from " +
+        "its UI at all. Pass includeUnreachable:true to see them. An ABSENT " +
+        "'reachableFrom' means EREP/EPROG could not be read, so nothing is known either " +
+        "way -- it does not mean unreachable.",
+    );
+    notes.push(
+      "'reportLike' is the distinction that matters before running anything, and it is " +
+        "NOT the same as kind='R'. Priority marks some PROCEDURES as reports with " +
+        "EPROG.RS='R' -- a third of them on this installation -- and those render output " +
+        "rather than change data. A procedure WITHOUT that mark can post, delete and " +
+        "upgrade, so read its help and ask the user first. Where 'rsNote' appears, it " +
+        "says what Priority recorded.",
     );
   }
 

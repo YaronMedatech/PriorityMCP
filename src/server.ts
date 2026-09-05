@@ -390,9 +390,11 @@ ${writeRule}
 catalogued ones. That makes YOU responsible for what a program does. Before
 running anything not in list_programs:
   1. read help{name, type} -- Priority's own description of it;
-  2. tell the user what it is and ask, if it is a procedure (P). A report (R)
-     renders output; a PROCEDURE CAN CHANGE, POST OR DELETE DATA, and there is
-     no undo.
+  2. tell the user what it is and ask, if it is a procedure that ACTS. A report
+     (R) renders output and is safe. So does a procedure Priority itself marks
+     as a report -- search_screens shows that as 'reportLike: true' with an
+     'rsNote', and a third of the procedures here carry it. Every OTHER
+     procedure CAN CHANGE, POST OR DELETE DATA, and there is no undo.
 A reply carrying 'caution' means nothing is documented here about that program.
 Never run a name you inferred; find it with search_screens{kinds:['P','R']}.`
       : `SCOPE: only the programs in list_programs may be run. A name outside that
@@ -1171,6 +1173,20 @@ program was NOT run -- 'unmatchedInputs' lists them. Fix the key to the exact
             program: chosen.name,
             title: chosen.title,
             permittedBy: chosen.source,
+            ...(chosen.reportLike !== undefined ? { reportLike: chosen.reportLike } : {}),
+            ...(chosen.reachableFrom
+              ? {
+                  reachableFrom: chosen.reachableFrom,
+                  ...(chosen.reachableFrom.length === 0
+                    ? {
+                        reachabilityNote:
+                          "Priority links this program from no menu, no program and no " +
+                          "document, so no user can run it from the UI. It may be internal " +
+                          "scaffolding. Say so before treating its output as a business answer.",
+                      }
+                    : {}),
+                }
+              : {}),
             ...(chosen.twin ? { twin: chosen.twin } : {}),
             ...(chosen.catalogEntry ? { catalogEntry: chosen.catalogEntry } : {}),
             ...(chosen.caution ? { caution: chosen.caution } : {}),
