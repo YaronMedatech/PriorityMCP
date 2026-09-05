@@ -246,6 +246,20 @@ the tree is already complete.
   Ok "node_modules present"
 }
 
+# programs.ts require()s priority-web-sdk LAZILY, so a missing copy does not stop
+# the server -- it fails the first run_program call, whenever that happens, with
+# "Cannot find module 'priority-web-sdk'". Measured on a real deploy: the package
+# had been vendored by hand and never declared, so `npm ci` installed everything
+# else and the program tools were quietly dead until someone tried to run a
+# report. It is a declared dependency now, which closes that route in; this
+# catches the other one, a node_modules copied from a machine that lacked it.
+if (Test-Path (Join-Path $root "node_modules\priority-web-sdk")) {
+  Ok "priority-web-sdk present -- the program tools can run"
+} else {
+  Warn "priority-web-sdk is MISSING. Discovery and the read tools are unaffected, but"
+  Warn "run_program / start_program / continue_program will fail at first use. Run 'npm install' here."
+}
+
 $hosting = Get-EnvValue $envFile "PRIORITY_HOSTING"
 $odataUrl = Get-EnvValue $envFile "PRIORITY_ODATA_URL"
 Info "PRIORITY_HOSTING=$hosting"

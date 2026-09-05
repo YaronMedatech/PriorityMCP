@@ -23,6 +23,7 @@
     "dotenv": "^16.6.1",
     "fastify": "^5.10.0",
     "marked": "^18.0.7",
+    "priority-web-sdk": "3.0.37",
     "zod": "^4.4.3"
   },
   "devDependencies": {
