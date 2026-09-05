@@ -18,7 +18,7 @@ is the code that runs.
 
 ```powershell
 npm run typecheck                 # tsc --noEmit. Run this before restarting the service.
-npm test                          # 14 offline suites -- no server, no Priority
+npm test                          # 15 offline suites -- no server, no Priority
 npm run test:live                 # 15 suites against the real installation
 npx tsx tests/live.http.ts        # the HTTP transport, as a remote client
 npx tsx tests/live.headerauth.ts  # all four accepted and four refused auth paths
@@ -118,6 +118,13 @@ in `README.md`; these are the ones that break code silently.
   `@odata.nextLink`. So aggregation is done here while paging, a short page is the only
   end-of-data signal, and there is no row total available at all. `$top` caps the
   **total** rows, not the page size. `$orderby` is ignored by some screens.
+- **The result ceilings are configurable and the tool descriptions quote them.**
+  `LIMITS` in `discovery.ts` is read once at module load, because `rowsPerQuery`
+  becomes a zod `.max()` that clients cache for the session. If you change what a
+  ceiling does, change the description in the same edit — `tests/limits.test.ts`
+  asserts the number in the prose matches the one in the schema, because a
+  description saying "capped at 500" on a server configured otherwise is a false
+  statement placed directly in the model's system prompt.
 - **A parent `$select` plus `$expand` truncates the response mid-JSON.** The select is
   dropped whenever an expand is present, with a note in the reply. A nested `$select`
   inside the expand is safe.

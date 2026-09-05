@@ -163,6 +163,14 @@ see [.env.example](.env.example). The three that decide the shape of a deploymen
   the first call without inputs only reports parameters, and a choice is never made
   server-side.
 
+- **`PRIORITY_MAX_ROWS_PER_QUERY` and friends** — the ceilings on one call's result,
+  all four taking `0` to mean no ceiling. Two of them (`ROWS_PER_QUERY`,
+  `RESPONSE_CHARS`) bound what lands in the model's context, and raising those does
+  not let a model handle more data — it lets one reply crowd out the conversation.
+  The other two (`SCAN_ROWS`, `GROUPS`) bound what `aggregate` reads while paging,
+  which costs requests and no context at all, and that is the pair to raise when an
+  answer needs more data behind it.
+
 `MCP_AUTH_TOKEN` is required whenever the listener is not loopback-only. The server
 refuses to start without it rather than warning — it holds Priority credentials and
 every tool reads live ERP data.
@@ -209,7 +217,7 @@ of it — both now use `curl`, which answers correctly.
 
 ```powershell
 npm run typecheck
-npm test                          # 14 offline suites -- no server, no Priority
+npm test                          # 15 offline suites -- no server, no Priority
 npm run test:live                 # 15 suites against the real installation
 npx tsx tests/live.http.ts        # the HTTP transport, as a remote client
 npx tsx tests/live.headerauth.ts  # all four accepted and four refused auth paths

@@ -9,6 +9,7 @@ import type { PriorityDictionary, ScreenEntry } from "./dictionary.js";
 import { fetchColumnHelp, fetchEntityHelp, fetchEntityHelpOutcome, type HelpOutcome, type HelpReference } from "./help.js";
 import type { Examples, Glossary } from "./glossary.js";
 import { CallerError } from "./errors.js";
+import { loadResultLimits, uncapped } from "./config.js";
 
 // The generic discovery + query layer: find a screen, learn what its columns
 // mean, then read it. Replaces the need to hardcode a per-domain method, which
@@ -16,13 +17,19 @@ import { CallerError } from "./errors.js";
 // the code unchallenged.
 
 /**
+ * The configured ceilings. Read once at module load, because `rowsPerQuery`
+ * becomes a zod `.max()` on the tool's input schema and clients cache that.
+ */
+export const LIMITS = loadResultLimits();
+
+/**
  * Character ceiling on a tool response, independent of the row ceiling.
  *
  * Both are needed and neither implies the other: 500 narrow rows is a small
  * payload, while 500 rows of a 200-column screen is enough to crowd out the rest
- * of a conversation.
+ * of a conversation. PRIORITY_MAX_RESPONSE_CHARS=0 removes it.
  */
-export const MAX_RESPONSE_CHARS = 200_000;
+export const MAX_RESPONSE_CHARS = uncapped(LIMITS.responseChars);
 
 /** Hard ceiling on columns described in one call, to keep a reply readable. */
 const MAX_COLUMNS_SHOWN = 150;
@@ -1143,13 +1150,27 @@ export const aggregateShape = {
       "OData $filter applied before grouping. Same limits as query: no `in`, no " +
         "contains(). Filtering first is the main way to keep a scan cheap.",
     ),
-  maxRows: z
-    .number()
-    .int()
-    .positive()
-    .max(50_000)
-    .optional()
-    .describe("Ceiling on rows scanned, default 50000. Hitting it makes totals a lower bound."),
+  maxRows: LIMITS.scanRows > 0
+    ? z
+        .number()
+        .int()
+        .positive()
+        .max(LIMITS.scanRows)
+        .optional()
+        .describe(
+          `Ceiling on rows scanned, default ${LIMITS.scanRows}. Hitting it makes totals a lower bound.`,
+        )
+    : z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          "Ceiling on rows scanned. This server has no ceiling configured " +
+            "(PRIORITY_MAX_SCAN_ROWS=0), so a scan runs until the data ends — pass a " +
+            "value to bound it. Scanned rows cost requests and time, not context: " +
+            "they are summed here and only the group rows come back.",
+        ),
 };
 
 export const distinctShape = {
@@ -1201,16 +1222,31 @@ export const queryShape = {
         "A nested $select is safe and keeps the payload down.",
     ),
   orderby: z.string().optional().describe("OData $orderby. Silently ignored by some screens."),
-  top: z
-    .number()
-    .int()
-    .positive()
-    .max(500)
-    .optional()
-    .describe(
-      "Maximum rows, default 50, hard maximum 500. On this server $top caps the " +
-        "TOTAL rows rather than setting a page size.",
-    ),
+  top: LIMITS.rowsPerQuery > 0
+    ? z
+        .number()
+        .int()
+        .positive()
+        .max(LIMITS.rowsPerQuery)
+        .optional()
+        .describe(
+          `Maximum rows, default 50, hard maximum ${LIMITS.rowsPerQuery}. On this server ` +
+            "$top caps the TOTAL rows rather than setting a page size.",
+        )
+    : z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          "Maximum rows, default 50. This server sets no hard maximum " +
+            "(PRIORITY_MAX_ROWS_PER_QUERY=0), so ask for what you can actually USE: " +
+            "every row returned goes into the conversation, and a large reply crowds " +
+            "out the context it was meant to inform. For a total or a count use " +
+            "aggregate, which pages the whole set outside the conversation and " +
+            "returns only the group rows. On this server $top caps the TOTAL rows " +
+            "rather than setting a page size.",
+        ),
   skip: z
     .number()
     .int()
@@ -1218,7 +1254,7 @@ export const queryShape = {
     .optional()
     .describe(
       "Rows to skip before the first returned row — the offset for paging past " +
-        "the 500-row cap. To read a whole screen, repeat the call raising skip by " +
+        "the row cap. To read a whole screen, repeat the call raising skip by " +
         "the number of rows SHOWN each time (the response tells you the exact " +
         "value in nextSkip). Keep entity, filter, select, expand and orderby " +
         "identical across pages, or the rows re-shuffle and skip will miss some.",
@@ -1350,7 +1386,10 @@ export async function runQuery(
   // presented as complete produces wrong totals.
   let shown = rows;
   let charCapped = false;
-  if (JSON.stringify(rows).length > MAX_RESPONSE_CHARS) {
+  // The Number.isFinite guard is not cosmetic: with the cap lifted, serialising
+  // the whole result just to compare it against Infinity is the one expensive
+  // thing left in this function, and it is pure waste.
+  if (Number.isFinite(MAX_RESPONSE_CHARS) && JSON.stringify(rows).length > MAX_RESPONSE_CHARS) {
     charCapped = true;
     let size = 0;
     const kept: Record<string, unknown>[] = [];

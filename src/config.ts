@@ -388,6 +388,81 @@ export function loadConfig(company?: string): PriorityConfig {
   return config;
 }
 
+// ---------------------------------------------------------------------------
+// Ceilings on one tool call's result
+// ---------------------------------------------------------------------------
+
+/**
+ * How much one call may return, and how much it may read to get there.
+ *
+ * Every value defaults to what these tools shipped with, and every value takes
+ * 0 to mean NO CEILING -- the same spelling PRIORITY_MAX_REQUESTS_PER_MIN uses,
+ * so there is one convention for "lift the limit" rather than four.
+ *
+ * The two halves are worth telling apart, because raising them buys different
+ * things:
+ *
+ *   rowsPerQuery and responseChars bound what lands in the MODEL'S CONTEXT.
+ *   Raising them does not let a model handle more data; it lets one reply crowd
+ *   out the conversation it was meant to inform, and past a point the client
+ *   simply drops the turn. There is no setting here that makes 50,000 detail
+ *   rows usable in a chat.
+ *
+ *   scanRows and groups bound what AGGREGATE reads while paging, which costs
+ *   requests and time but no context at all -- the rows are summed here and only
+ *   the group rows are returned. This is the half worth raising when the answer
+ *   needs more data, and it is why 'aggregate' exists rather than 'query' with a
+ *   bigger cap.
+ */
+export interface ResultLimits {
+  /** Hard ceiling on `query`'s `top`. 0 = uncapped. */
+  rowsPerQuery: number;
+  /** Character ceiling on a `query` reply, independent of the row count. 0 = uncapped. */
+  responseChars: number;
+  /** Ceiling on rows `aggregate` will page through. 0 = uncapped. */
+  scanRows: number;
+  /** Ceiling on distinct groups `aggregate` will create. 0 = uncapped. */
+  groups: number;
+}
+
+const LIMIT_DEFAULTS: ResultLimits = {
+  rowsPerQuery: 500,
+  responseChars: 200_000,
+  scanRows: 50_000,
+  groups: 5_000,
+};
+
+function limit(name: string, fallback: number, e: NodeJS.ProcessEnv): number {
+  const raw = (e[name] ?? "").trim();
+  if (raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new ConfigError(
+      `${name} must be a whole number, 0 or greater (got: ${raw}).\n\n` +
+        `It is a ceiling on one tool call; 0 removes the ceiling. Leave it unset ` +
+        `for the default of ${fallback}.`,
+    );
+  }
+  return value;
+}
+
+/**
+ * Read once, at module load, because two of these become zod `.max()` bounds on
+ * a tool's input schema — and a client caches that schema for the session, so it
+ * could not vary per call even if that were wanted.
+ */
+export function loadResultLimits(e: NodeJS.ProcessEnv = process.env): ResultLimits {
+  return {
+    rowsPerQuery: limit("PRIORITY_MAX_ROWS_PER_QUERY", LIMIT_DEFAULTS.rowsPerQuery, e),
+    responseChars: limit("PRIORITY_MAX_RESPONSE_CHARS", LIMIT_DEFAULTS.responseChars, e),
+    scanRows: limit("PRIORITY_MAX_SCAN_ROWS", LIMIT_DEFAULTS.scanRows, e),
+    groups: limit("PRIORITY_MAX_GROUPS", LIMIT_DEFAULTS.groups, e),
+  };
+}
+
+/** `Infinity` for an uncapped (0) setting, so arithmetic needs no special case. */
+export const uncapped = (value: number): number => (value > 0 ? value : Infinity);
+
 /**
  * Config for the Web SDK channel, which runs programs and reports.
  *

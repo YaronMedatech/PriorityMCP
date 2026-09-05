@@ -12,6 +12,7 @@ import { fetchSkill, listSkills, matchSkills } from "./skills.js";
 import type { InputValue, SessionAction } from "./programs.js";
 import { loadProgramDenyList, loadProgramPolicy, resolveProgram } from "./programselect.js";
 import {
+  LIMITS as RESULT_LIMITS,
   aggregateShape,
   describeScreen,
   describeScreenShape,
@@ -38,6 +39,15 @@ import { z } from "zod";
 // stream and the client disconnects with a parse error that points nowhere near
 // the real cause. Every diagnostic in this file goes to stderr.
 const log = (msg: string) => process.stderr.write(`[priority-mcp] ${msg}\n`);
+
+/**
+ * The row cap `query` enforces, or 0 when PRIORITY_MAX_ROWS_PER_QUERY lifted it.
+ *
+ * The tool descriptions below quote it, so it cannot be a literal: a description
+ * that says "capped at 500" on a server configured otherwise is a false statement
+ * placed directly in the model's system prompt, which is worse than saying nothing.
+ */
+const ROW_CAP = RESULT_LIMITS.rowsPerQuery;
 
 /** One spelling of "on" for every flag, so .env behaves the same everywhere. */
 const envFlag = (name: string): boolean =>
@@ -583,9 +593,10 @@ somewhere different and the wrong type reads the wrong place.`,
       description: `Read individual rows from any Priority screen. READ-ONLY.
 
 FOR TOTALS, COUNTS OR "PER X" QUESTIONS, USE 'aggregate' INSTEAD. This tool returns
-detail rows and is capped at 500 per call, so any total you build by adding up
-what it returns is wrong the moment the data exceeds one page. 'aggregate' pages
-the whole set outside the conversation and returns the grouped answer.
+detail rows${ROW_CAP ? ` and is capped at ${ROW_CAP} per call` : ``}, so any total
+you build by adding up what it returns is wrong the moment the data exceeds one
+page. 'aggregate' pages the whole set outside the conversation and returns the
+grouped answer.
 
 Use 'entity' for a normal read, or 'path' for a keyed row or a sub-form.
 
@@ -597,12 +608,12 @@ wastes a turn, so respect them up front:
 - 'select' is ignored when 'expand' is set -- that combination truncates the
   response on this server. Use a nested $select inside expand instead.
 - Avoid 'ne' on a nullable column; it drops the null rows silently.
-- 'top' caps TOTAL rows, not page size, and 500 is the ceiling.
+- 'top' caps TOTAL rows, not page size${ROW_CAP ? `, and ${ROW_CAP} is the ceiling` : ` (no ceiling is set here)`}.
 - Sub-forms are not entity sets; reach them via expand or a keyed path.
 
 READING A SCREEN LARGER THAN ONE PAGE -- use 'skip', not a hand-built path.
-Two separate ceilings apply: 500 rows, and a response size cap that a wide screen
-can hit well inside 500 rows. Either one makes the reply a PAGE, not the answer.
+${ROW_CAP ? `Two separate ceilings apply: ${ROW_CAP} rows, and a response size cap that a wide
+screen can hit well inside ${ROW_CAP} rows. Either one makes` : `A response size cap applies, which a wide screen can hit at a modest row count. It makes`} the reply a PAGE, not the answer.
 When that happens the response carries 'hasMore' and 'nextSkip'; call again with
 skip=nextSkip, keeping entity, filter, select, expand and orderby byte-identical,
 until hasMore is false. Then combine the pages yourself. Passing select to fetch
@@ -635,11 +646,13 @@ USE THIS INSTEAD OF query FOR ANY "how much / how many / per month / by customer
 top N" QUESTION. Priority cannot aggregate -- it accepts OData's $apply and
 silently ignores it, returning ungrouped rows -- so this server pages the data and
 groups it here. That paging costs no context, which is the whole point: 'sales per
-month' comes back as twelve rows instead of thousands, and the 500-row cap on
-query stops applying.
+month' comes back as twelve rows instead of thousands${ROW_CAP ? `, and the ${ROW_CAP}-row cap
+on query stops applying` : ``}.
 
-Never try to aggregate by reading rows with query and adding them up. You would be
-limited to 500 rows per call, and a total built from a capped page is wrong.
+Never try to aggregate by reading rows with query and adding them up: every row
+you read that way lands in the conversation${ROW_CAP ? `, and you are limited to ${ROW_CAP} per
+call` : ``}, so a total built from what came back is wrong as soon as there was
+more of it.
 
   groupBy    columns to group by; omit for one grand-total row
   aggregate  [{fn, column, as}] with fn = count | sum | avg | min | max

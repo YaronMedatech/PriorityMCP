@@ -1,4 +1,5 @@
 import { PriorityODataClient } from "./odata.js";
+import { loadResultLimits, uncapped } from "./config.js";
 
 // Aggregation, performed by this server rather than by Priority.
 //
@@ -34,16 +35,29 @@ export interface AggregateResult {
   notes: string[];
 }
 
-/** Rows read per request while scanning. The server's own hard ceiling. */
+/**
+ * Rows read per request while scanning. The server's own hard ceiling.
+ *
+ * NOT a limit on the answer, and the easiest number here to misread as one: the
+ * scan keeps requesting pages of this size until the data runs out.
+ */
 const SCAN_PAGE = 500;
+
+const LIMITS = loadResultLimits();
+
 /**
  * Safety ceiling on a scan.
  *
  * Aggregation reads every matching row, so an unfiltered scan of a large screen
  * is the one way this tool can be expensive. Stopping at a known point and saying
  * so beats either hanging or silently reporting a partial total as final.
+ *
+ * Those rows cost requests and time and no context at all -- they are summed here
+ * and only the group rows are returned -- so this is the ceiling to raise when an
+ * answer genuinely needs more data. PRIORITY_MAX_SCAN_ROWS=0 removes it, and then
+ * a scan runs until the data ends or the per-session request budget stops it.
  */
-const MAX_SCAN_ROWS = 50_000;
+const MAX_SCAN_ROWS = uncapped(LIMITS.scanRows);
 /**
  * Ceiling on distinct groups.
  *
@@ -55,8 +69,11 @@ const MAX_SCAN_ROWS = 50_000;
  * Hitting it aborts the scan rather than continuing without creating new groups.
  * Continuing would leave the groups already collected with counts that silently
  * omit later rows -- a wrong number that looks right.
+ *
+ * PRIORITY_MAX_GROUPS=0 removes it. Unlike the scan ceiling, every group DOES
+ * land in the reply, so this one is a context cost as well as a memory one.
  */
-const MAX_GROUPS = 5_000;
+const MAX_GROUPS = uncapped(LIMITS.groups);
 
 const NUMERIC_FNS: AggFn[] = ["sum", "avg", "min", "max"];
 
