@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import https from "node:https";
 import tls from "node:tls";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
@@ -363,40 +362,50 @@ export class ProgramRunner {
   // -- session ---------------------------------------------------------------
 
   /**
-   * Teach Node's DEFAULT https agent what this Priority server's certificate is.
+   * Teach this PROCESS what the Priority server's certificate is.
    *
-   * The OData client is handed `ca` on every request, so PRIORITY_CA_BUNDLE has
-   * always worked there. The Web SDK has no such seam: it issues its calls
-   * through xhr2, which builds plain https requests against https.globalAgent
-   * and cannot be given an option. Measured on a self-hosted installation with a
-   * self-signed certificate: OData read 2,159 entity sets perfectly while every
-   * SDK login failed with `{"code":"loginFailed","message":"Can't connect to
-   * server."}` -- a message that reads like a wrong URL or a refused password
-   * and is neither. Supplying the same PEM through NODE_EXTRA_CA_CERTS made the
-   * identical login succeed, which is what identified this.
+   * PRIORITY_CA_BUNDLE has always reached the OData client, which is handed `ca`
+   * on every request. The Web SDK has no such seam, and it is worse than having
+   * none: its index.js calls
+   * `XMLHttpRequest.nodejsSet({httpsAgent: new https.Agent({keepAlive: true})})`,
+   * so it runs on an agent of its OWN that inherits nothing from
+   * https.globalAgent. Measured, in that order: setting
+   * `https.globalAgent.options.ca` turns a plain https.get to the Priority host
+   * from DEPTH_ZERO_SELF_SIGNED_CERT into HTTP 200 and changes nothing at all
+   * for the SDK.
    *
-   * The CA is APPENDED to the built-in roots rather than replacing them.
-   * Assigning `ca` outright would leave this process trusting one private
-   * certificate and nothing else, which would break every other HTTPS call it
-   * makes -- the Anthropic API in the chat and web clients, for one.
+   * Overriding createSecureContext catches every TLS connection the process
+   * makes, whichever agent asks for one. That is what NODE_EXTRA_CA_CERTS does,
+   * and supplying the PEM that way is what made this exact login succeed by hand
+   * -- but Node reads that variable once at startup, so it is not something this
+   * server can set for itself.
    *
-   * Run once. Node caches a secure context per agent, so repeating it per login
-   * is waste rather than harm.
+   * Why it matters: on a self-hosted installation with a self-signed certificate
+   * -- which the README calls almost every on-prem Priority server -- an
+   * operator could configure the certificate correctly, watch every read tool
+   * prove it, and still have run_program fail with the SDK's generic
+   * {"code":"loginFailed","message":"Can't connect to server."}, a message that
+   * names neither TLS nor the setting that fixes it.
    */
   private applyTlsTrust(cfg: WebSdkConfig): void {
     if (ProgramRunner.tlsApplied) return;
     ProgramRunner.tlsApplied = true;
 
     if (cfg.caBundle) {
-      const existing = https.globalAgent.options.ca;
-      const roots = existing === undefined ? [...tls.rootCertificates] : [existing].flat();
-      https.globalAgent.options.ca = [...roots, cfg.caBundle] as string[];
+      const original = tls.createSecureContext;
+      const trusted = [...tls.rootCertificates, cfg.caBundle];
+      tls.createSecureContext = (options: tls.SecureContextOptions = {}) =>
+        // An explicit `ca` wins. odata.ts passes its own on every request and
+        // must keep pinning exactly what it was given, rather than silently
+        // gaining the public roots on top.
+        original(options.ca ? options : { ...options, ca: trusted });
     }
+
     if (!cfg.verifySsl) {
-      // The operator asked for this with PRIORITY_VERIFY_SSL=0, and it cannot be
-      // scoped to the SDK: there is only one default agent. Say so, because it
-      // silently relaxes every other HTTPS call this process makes too.
-      https.globalAgent.options.rejectUnauthorized = false;
+      // PRIORITY_VERIFY_SSL=0, and it cannot be scoped to the SDK: this is the
+      // process-wide switch, read per connection. Say so on stderr, because it
+      // relaxes every other HTTPS call this process makes as well.
+      process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0";
       process.stderr.write(
         "[priority-mcp] PRIORITY_VERIFY_SSL=0: TLS verification is OFF for the Web SDK, " +
           "and for every other HTTPS call this process makes. Prefer PRIORITY_CA_BUNDLE.\n",
