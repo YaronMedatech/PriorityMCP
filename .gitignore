@@ -27,3 +27,8 @@ client-kit/
 # Installers staged on a server before it had Node: the MSI is 32 MB and comes
 # from nodejs.org, so it is a download rather than a thing to keep in history.
 _setup/
+
+# Throwaway MCP/SDK probes written next to the checkout while diagnosing a live
+# server. They carry no secrets but they are not the project.
+.v.mjs
+.verify-*.mjs
