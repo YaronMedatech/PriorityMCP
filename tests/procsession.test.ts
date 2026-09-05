@@ -305,7 +305,110 @@ console.log("\n6. Session misuse is a CallerError, not a Priority failure");
   await runner.continue(s1.session, { cancel: true });
 }
 
-console.log("\n7. htmlToText keeps rows and cells apart");
+console.log("\n7. A program that asks TWICE, behind a format step");
+{
+  // Shaped on AGEDEBTCUST3, measured 2026-09-05: its first step is a format
+  // question and TWO parameter dialogs follow it. The old code checked supplied
+  // keys against one dialog at a time, so a key for the second was refused at
+  // the first and a key for the first was refused at the second -- both correct,
+  // neither ever accepted, and the run impossible to parameterise at all.
+  const scripted = (log: string[]) => {
+    const end: Step = { type: "end" };
+    const display: Step = {
+      type: "displayUrl",
+      Urls: [{ datauri: "data:text/html;base64," + Buffer.from("<table><tr><td>ok</td></tr></table>").toString("base64"), type: "html" }],
+      proc: {
+        continueProc: async () => (log.push("continueProc"), end),
+        // The real SDK offers cancel on every step; without it here the test
+        // cannot tell "stopped before output" from "never tried to stop".
+        cancel: async () => (log.push("cancel"), undefined),
+      },
+    };
+    const second: Step = {
+      type: "inputFields",
+      input: { EditFields: [{ field: 2, title: "As of Date", mandatory: 1, value: "05/09/26" }] },
+      proc: {
+        inputFields: async (_n: number, payload: { EditFields: { field: number; value: string }[] }) => {
+          log.push(`dlg2:${payload.EditFields.map((f) => `${f.field}=${f.value}`).join(",")}`);
+          return display;
+        },
+        cancel: async () => (log.push("cancel"), undefined),
+      },
+    };
+    const first: Step = {
+      type: "inputFields",
+      input: { EditFields: [{ field: 1, title: "Subsidiary", value: "000" }] },
+      proc: {
+        inputFields: async (_n: number, payload: { EditFields: { field: number; value: string }[] }) => {
+          log.push(`dlg1:${payload.EditFields.map((f) => `${f.field}=${f.value}`).join(",")}`);
+          return second;
+        },
+        cancel: async () => (log.push("cancel"), undefined),
+      },
+    };
+    // The format question comes FIRST, before either dialog.
+    const fmt: Step = {
+      type: "reportOptions",
+      input: { formats: [{ format: 1, selected: 1, title: "Standard" }] },
+      proc: { reportOptions: async () => first, cancel: async () => (log.push("cancel"), undefined) },
+    };
+    return fmt;
+  };
+  const sdkFor = (log: string[]) =>
+    ({ login: async () => undefined, procStart: async () => scripted(log) }) as unknown as Record<string, unknown>;
+
+  {
+    const log: string[] = [];
+    const runner = new ProgramRunner("demo", sdkFor(log));
+    const r = await runner.run("TWODLG", "R", { Subsidiary: "000", "As of Date": "31/12/25" });
+    if (r.status === "completed") ok("keys for BOTH dialogs are accepted in one call");
+    else bad(`status=${r.status} messages=${r.messages.join(" | ")}`);
+    if (log.includes("dlg1:1=000") && log.includes("dlg2:2=31/12/25")) {
+      ok("each key reached the dialog that owns it");
+    } else bad(`payloads: ${log.join(" ; ")}`);
+  }
+
+  {
+    const log: string[] = [];
+    const runner = new ProgramRunner("demo", sdkFor(log));
+    const r = await runner.run("TWODLG", "R", { "As of Date": "31/12/25" });
+    if (r.status === "completed") ok("a key for the SECOND dialog alone is accepted");
+    else bad(`status=${r.status} -- refused at the first dialog again`);
+  }
+
+  {
+    const log: string[] = [];
+    const runner = new ProgramRunner("demo", sdkFor(log));
+    const r = await runner.run("TWODLG", "R", { Nonsense: "x" });
+    if (r.status === "unmatched_inputs" && r.unmatchedInputs?.[0] === "Nonsense") {
+      ok("a key no dialog accepts is still refused");
+    } else bad(`a bogus key produced status=${r.status}`);
+    // It cancels before OUTPUT, which is as early as Priority allows: dialog two
+    // is invisible until dialog one has been submitted, so a multi-dialog
+    // program cannot be validated without walking its questions.
+    if (log.includes("cancel") && !log.includes("continueProc")) {
+      ok("the refusal cancels before any output is produced");
+    } else bad(`refusal came too late: ${log.join(" ; ")}`);
+    // And it must not claim nothing happened, because the dialogs were answered.
+    const said = r.messages.join(" ");
+    if (said.includes("remembered defaults") && !said.includes("Nothing was executed")) {
+      ok("and says the dialogs were answered rather than claiming nothing ran");
+    } else bad(`message hides what happened: ${said}`);
+  }
+
+  {
+    const log: string[] = [];
+    const runner = new ProgramRunner("demo", sdkFor(log));
+    const r = await runner.probe("TWODLG", "P");
+    // A format question is not the program acting, so a probe walks past it and
+    // reports the parameters instead of claiming there are none.
+    if (r.status === "needs_input" && (r.inputFields ?? [])[0]?.title === "Subsidiary") {
+      ok("a probe passes the format step and reports the real first dialog");
+    } else bad(`probe gave status=${r.status}: ${r.messages.join(" | ")}`);
+  }
+}
+
+console.log("\n8. htmlToText keeps rows and cells apart");
 const t = htmlToText("<html><head><style>x</style></head><body><table>\n  <tr>\n    <td>a</td>\n    <td>b</td>\n  </tr>\n  <tr><td>c</td></tr></table></body></html>");
 if (t === "a\tb\nc") ok("pretty-printed HTML flattens to a\\tb / c");
 else bad(`got ${JSON.stringify(t)}`);

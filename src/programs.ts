@@ -291,6 +291,17 @@ interface LiveSession {
   timer: NodeJS.Timeout;
 }
 
+/**
+ * Steps that are still part of asking the caller for things.
+ *
+ * Measured on AGEDEBTCUST3: its very first step is `reportOptions` and the two
+ * parameter dialogs come AFTER it. So "the input phase" cannot be defined as
+ * "until the first step that is not inputFields" -- a format question is not the
+ * program acting, and treating it as such is what made this server report a
+ * program with six parameters as one that "asks for no parameters".
+ */
+const INPUT_PHASE = new Set(["inputFields", "reportOptions", "documentOptions", "inputHelp", "message"]);
+
 const MAX_OUTPUT_CHARS = 60_000;
 const MAX_STEPS = 40;
 /**
@@ -522,6 +533,8 @@ export class ProgramRunner {
       steps: 0,
     };
     let html = "";
+    /** Supplied keys not yet claimed by a dialog. Emptied as the dialogs arrive. */
+    const pending = new Set(Object.keys(inputs ?? {}));
 
     let step: ProcStep | undefined = await this.procStart(name, type);
 
@@ -544,14 +557,52 @@ export class ProgramRunner {
           return finish(result, html, keepHtml);
         }
         if (String(step.messagetype ?? "").toLowerCase() === "error") result.status = "error";
-        if (stopBeforeActing(result, proc, probeOnly, type, kind)) return finish(result, html, keepHtml);
+        if (await stopBeforeActing(result, proc, probeOnly, type, kind)) return finish(result, html, keepHtml);
         step = await proc?.message?.(1);
         continue;
       }
 
+      // The input phase is over the moment a step arrives that is not part of
+      // it. Keys still unclaimed then matched no dialog this program has, so
+      // refuse BEFORE it produces anything: a typo must never run a procedure
+      // against its defaults and come back saying "completed".
+      if (pending.size > 0 && !INPUT_PHASE.has(kind)) {
+        result.status = "unmatched_inputs";
+        result.unmatchedInputs = [...pending];
+        // Says what actually happened, and it is not "nothing".
+        //
+        // A multi-dialog program cannot be validated up front: dialog two is
+        // invisible until dialog one has been submitted, so reaching the end of
+        // the questions means every dialog was answered -- with the caller's
+        // values where they matched, and with Priority's own remembered defaults
+        // everywhere else. That is a real limit of this API, not of this code,
+        // and pretending otherwise would be the more dangerous reply.
+        //
+        // Stopped here, before output. For a report that means nothing was
+        // produced. For a procedure that ACTS, submitting its last dialog is the
+        // act, so it may already have happened -- which is why that case says so
+        // in its own words rather than sharing a sentence with the harmless one.
+        const acting = type === "P";
+        result.messages.push(
+          `These input keys match no parameter of ${name} in ANY of its dialogs: ` +
+            `${[...pending].join(", ")}. The run was stopped before output. ` +
+            (acting
+              ? `WARNING: this is a procedure. Its dialogs were answered with Priority's ` +
+                `remembered defaults to reach this point, and if it acts on submission it ` +
+                `may already have done so. Check before running it again.`
+              : `Its dialogs were answered with Priority's remembered defaults to reach ` +
+                `this point; a report produces nothing until its output step, so nothing ` +
+                `was produced.`) +
+            ` Call without 'inputs' to see what the first dialog asks for, or use ` +
+            `start_program to walk the dialogs one at a time and answer each in turn.`,
+        );
+        await proc?.cancel?.().catch(() => undefined);
+        return finish(result, html, keepHtml);
+      }
+
       // Every remaining step advances the program. For a procedure under a probe
       // that IS the action, so stop here rather than take it.
-      if (kind !== "inputFields" && stopBeforeActing(result, proc, probeOnly, type, kind)) {
+      if (!INPUT_PHASE.has(kind) && (await stopBeforeActing(result, proc, probeOnly, type, kind))) {
         return finish(result, html, keepHtml);
       }
 
@@ -571,27 +622,17 @@ export class ProgramRunner {
           return finish(result, html, keepHtml);
         }
 
-        // Refuse the run if any supplied key matched no parameter.
+        // A key is checked against EVERY dialog, not just this one.
         //
-        // The alternative -- which this did before -- is to drop the unmatched
-        // key and send "" for the parameter it was meant to fill. For a type 'P'
-        // procedure that means a typo in a parameter name silently runs the
-        // program against its DEFAULTS instead of the caller's intent, and the
-        // reply says "completed". A caller cannot detect that, so it has to be
-        // refused rather than reported alongside a run that already happened.
-        const unmatched = unmatchedKeys(fields, inputs);
-        if (unmatched.length > 0) {
-          result.status = "unmatched_inputs";
-          result.unmatchedInputs = unmatched;
-          result.messages.push(
-            `Not run. These input keys match no parameter of ${name}: ` +
-              `${unmatched.join(", ")}. Use the exact 'title', 'code' or 'field' ` +
-              `from inputFields above. Nothing was executed.`,
-          );
-          await proc?.cancel?.().catch(() => undefined);
-          return finish(result, html, keepHtml);
-        }
-
+        // Measured on AGEDEBTCUST3: the program asks twice -- `Subsidiary`, then
+        // five more fields including `As of Date` -- and the check used to run
+        // per dialog. So `As of Date` was refused at dialog one and `Subsidiary`
+        // was refused at dialog two, each time echoing back the dialog that does
+        // not contain it. Both keys were correct; neither could ever be sent.
+        //
+        // Keys are consumed as the dialogs that own them appear, and what is
+        // still unclaimed when the input phase ends is what was really wrong.
+        for (const k of matchedKeys(fields, pending)) pending.delete(k);
         step = await proc?.inputFields?.(1, { EditFields: editPayload(fields, inputs) });
         continue;
       }
@@ -859,7 +900,11 @@ export class ProgramRunner {
           ...(isDoc ? { document: true as const } : {}),
           messages: sess.messages,
           next:
-            `The output is ready. Send continue{output:{}} to take Priority's default format` +
+            `Priority is asking which output FORMAT to use. This can come BEFORE the ` +
+            `program's parameters -- measured on one report, the format question is the ` +
+            `first step and two parameter dialogs follow it -- so answering it is often ` +
+            `how you reach them, not the end of the run. ` +
+            `Send continue{output:{}} to take Priority's default format` +
             (formats.length
               ? `, or output:{format:<id>} to pick one of ${formats.length} -- show the user their titles.`
               : `.`) +
@@ -968,21 +1013,31 @@ export class ProgramRunner {
  * Returns true when the caller should give up the run. Cancels the program on
  * the way out, so nothing is left open on the Priority server.
  */
-function stopBeforeActing(
+async function stopBeforeActing(
   result: ProgramRunResult,
   proc: ProcMethods | undefined,
   probeOnly: boolean,
   type: "P" | "R",
   kind: string,
-): boolean {
+): Promise<boolean> {
   if (!probeOnly || type !== "P") return false;
   result.status = "would_run";
+  // States what was OBSERVED, not what was inferred from it. The old wording
+  // said the program "asks for no parameters", which it could not know: it was
+  // read off the first step not being an input dialog, and AGEDEBTCUST3 opens
+  // with a format question and then asks for six parameters across two dialogs.
+  // A caller told "no parameters" about that program stops looking.
   result.messages.push(
-    `Nothing was run. ${result.program} asks for no parameters, so it would begin acting ` +
-      `immediately (its first step is '${kind}'). Read help{name:'${result.program}', type:'P'} ` +
-      `and tell the user what it does; call again with inputs:{} to run it deliberately.`,
+    `Nothing was run. ${result.program} reached a '${kind}' step, which would advance a ` +
+      `procedure, before asking for any parameters -- so this probe stopped there rather ` +
+      `than take it. That does NOT mean it has no parameters; it may ask further in. ` +
+      `Read help{name:'${result.program}', type:'P'} and tell the user what it does, then ` +
+      `either call again with inputs:{} to run it deliberately, or use start_program to ` +
+      `walk it a step at a time.`,
   );
-  void proc?.cancel?.().catch(() => undefined);
+  // Awaited: a fire-and-forget cancel leaves a procedure open on the Priority
+  // server after this function's caller has already returned.
+  await proc?.cancel?.().catch(() => undefined);
   return true;
 }
 
@@ -1108,6 +1163,24 @@ function describeOptions(options: unknown[]): ChoiceOption[] {
     const help = typeof r["help"] === "string" && r["help"].trim() ? r["help"].trim() : undefined;
     return { id, index: i + 1, label: String(label), ...(help ? { help } : {}) };
   });
+}
+
+/**
+ * Which of the still-unclaimed keys THIS dialog accepts.
+ *
+ * The counterpart to unmatchedKeys, and the reason both exist: a session answers
+ * one dialog at a time and can be told immediately when a key is wrong, while a
+ * one-call run walks several dialogs and cannot judge a key until it has seen
+ * them all.
+ */
+function matchedKeys(fields: EditField[], pending: Set<string>): string[] {
+  const accepted = new Set<string>();
+  for (const f of fields) {
+    for (const k of [f.title, f.code, f.field]) {
+      if (k !== undefined && k !== null && String(k) !== "") accepted.add(String(k));
+    }
+  }
+  return [...pending].filter((k) => accepted.has(k));
 }
 
 function unmatchedKeys(fields: EditField[], inputs: Record<string, InputValue>): string[] {
