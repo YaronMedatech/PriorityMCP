@@ -23,3 +23,7 @@ client-kit/
 # Written by scripts/bootstrap-server.ps1: records that this machine already got
 # its own bearer token, so a re-run does not rotate it and break the client kits.
 .bootstrap-token-provisioned
+
+# Installers staged on a server before it had Node: the MSI is 32 MB and comes
+# from nodejs.org, so it is a download rather than a thing to keep in history.
+_setup/
