@@ -107,6 +107,17 @@ export interface WebSdkConfig {
   /** Which of the two the identity is, for logs. */
   identity: "pat" | "user";
   hosting: Hosting;
+  /**
+   * The same TLS trust the OData client uses, carried here because the Web SDK
+   * has nowhere to receive it. odata.ts passes `ca` on every request; the SDK
+   * issues its calls through xhr2, which uses Node's default HTTPS agent and
+   * knows nothing about this server's configuration. Measured on a self-hosted
+   * installation with a self-signed certificate: OData read perfectly while
+   * every SDK login failed with its generic "Can't connect to server", which
+   * reads like a network or a credential problem and is neither.
+   */
+  caBundle?: string;
+  verifySsl: boolean;
   tabulaini: string;
   /** Absolute path to the runnable-program catalog. */
   catalogPath: string;
@@ -170,6 +181,32 @@ function buildAuthHeader(): string {
 }
 
 export class ConfigError extends Error {}
+
+/**
+ * PEM contents of PRIORITY_CA_BUNDLE, or undefined when none is configured.
+ *
+ * Shared by both channels on purpose. The OData client receives it as an
+ * explicit `ca` per request; the Web SDK cannot be handed anything, so
+ * programs.ts installs it on Node's default HTTPS agent instead. Two copies of
+ * this reader would be two chances for the channels to disagree about what the
+ * operator configured, and they already disagreed once -- the SDK ignored the
+ * setting entirely, and a self-signed installation could read data over OData
+ * while every program run failed with the SDK's generic "Can't connect to
+ * server".
+ */
+function readCaBundle(): string | undefined {
+  const caPath = env("PRIORITY_CA_BUNDLE");
+  if (!caPath) return undefined;
+  const resolvedPath = path.isAbsolute(caPath) ? caPath : path.join(PROJECT_ROOT, caPath);
+  try {
+    return fs.readFileSync(resolvedPath, "utf8");
+  } catch (err) {
+    throw new ConfigError(
+      `PRIORITY_CA_BUNDLE points at ${resolvedPath}, which could not be read: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Environments (Priority companies)
@@ -339,19 +376,7 @@ export function loadConfig(company?: string): PriorityConfig {
   // every entity path hang off it, so no trailing slash.
   const normalizedUrl = odataUrlFor(resolved);
 
-  let caBundle: string | undefined;
-  const caPath = env("PRIORITY_CA_BUNDLE");
-  if (caPath) {
-    const resolvedPath = path.isAbsolute(caPath) ? caPath : path.join(PROJECT_ROOT, caPath);
-    try {
-      caBundle = fs.readFileSync(resolvedPath, "utf8");
-    } catch (err) {
-      throw new ConfigError(
-        `PRIORITY_CA_BUNDLE points at ${resolvedPath}, which could not be read: ` +
-          `${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
+  const caBundle = readCaBundle();
 
   const timeoutRaw = env("PRIORITY_TIMEOUT_MS");
   const timeoutMs = timeoutRaw ? Number(timeoutRaw) : 45_000;
@@ -523,11 +548,17 @@ export function loadWebSdkConfig(company_?: string): WebSdkConfig | { error: str
   }
 
   const catalog = env("PRIORITY_PROGRAMS_FILE") ?? "programs.json";
+  const tlsCa = readCaBundle();
   return {
     url: url!,
     company: company!,
     ...identity!,
     hosting,
+    // Read straight from the environment rather than from loadConfig(), which
+    // needs a resolvable company and throws without credentials -- this config
+    // is deliberately allowed to exist when that one cannot.
+    ...(tlsCa === undefined ? {} : { caBundle: tlsCa }),
+    verifySsl: !["0", "false", "no"].includes((env("PRIORITY_VERIFY_SSL") ?? "1").toLowerCase()),
     tabulaini: env("PRIORITY_TABULAINI") ?? derived?.tabulaini ?? "tabula.ini",
     catalogPath: path.isAbsolute(catalog) ? catalog : path.join(PROJECT_ROOT, catalog),
   };

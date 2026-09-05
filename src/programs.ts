@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import https from "node:https";
+import tls from "node:tls";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { loadWebSdkConfig, type WebSdkConfig } from "./config.js";
@@ -303,6 +305,8 @@ export const SESSION_TTL_MS = 5 * 60_000;
 const NOT_FOUND_MARKER = "No such Tabula Entity";
 
 export class ProgramRunner {
+  /** Process-wide, because the agent it configures is. */
+  private static tlsApplied = false;
   private sdk: Record<string, unknown> | undefined;
   private loggedIn = false;
   private readonly cfg: WebSdkConfig | { error: string };
@@ -358,9 +362,52 @@ export class ProgramRunner {
 
   // -- session ---------------------------------------------------------------
 
+  /**
+   * Teach Node's DEFAULT https agent what this Priority server's certificate is.
+   *
+   * The OData client is handed `ca` on every request, so PRIORITY_CA_BUNDLE has
+   * always worked there. The Web SDK has no such seam: it issues its calls
+   * through xhr2, which builds plain https requests against https.globalAgent
+   * and cannot be given an option. Measured on a self-hosted installation with a
+   * self-signed certificate: OData read 2,159 entity sets perfectly while every
+   * SDK login failed with `{"code":"loginFailed","message":"Can't connect to
+   * server."}` -- a message that reads like a wrong URL or a refused password
+   * and is neither. Supplying the same PEM through NODE_EXTRA_CA_CERTS made the
+   * identical login succeed, which is what identified this.
+   *
+   * The CA is APPENDED to the built-in roots rather than replacing them.
+   * Assigning `ca` outright would leave this process trusting one private
+   * certificate and nothing else, which would break every other HTTPS call it
+   * makes -- the Anthropic API in the chat and web clients, for one.
+   *
+   * Run once. Node caches a secure context per agent, so repeating it per login
+   * is waste rather than harm.
+   */
+  private applyTlsTrust(cfg: WebSdkConfig): void {
+    if (ProgramRunner.tlsApplied) return;
+    ProgramRunner.tlsApplied = true;
+
+    if (cfg.caBundle) {
+      const existing = https.globalAgent.options.ca;
+      const roots = existing === undefined ? [...tls.rootCertificates] : [existing].flat();
+      https.globalAgent.options.ca = [...roots, cfg.caBundle] as string[];
+    }
+    if (!cfg.verifySsl) {
+      // The operator asked for this with PRIORITY_VERIFY_SSL=0, and it cannot be
+      // scoped to the SDK: there is only one default agent. Say so, because it
+      // silently relaxes every other HTTPS call this process makes too.
+      https.globalAgent.options.rejectUnauthorized = false;
+      process.stderr.write(
+        "[priority-mcp] PRIORITY_VERIFY_SSL=0: TLS verification is OFF for the Web SDK, " +
+          "and for every other HTTPS call this process makes. Prefer PRIORITY_CA_BUNDLE.\n",
+      );
+    }
+  }
+
   private async ensureLogin(): Promise<Record<string, unknown>> {
     if (this.sdk && this.loggedIn) return this.sdk;
     const cfg = this.config();
+    this.applyTlsTrust(cfg);
 
     // Loaded lazily so an installation that never runs programs does not pay for
     // the SDK, and a missing vendored copy fails only this tool.
