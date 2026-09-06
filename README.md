@@ -175,6 +175,14 @@ see [.env.example](.env.example). The three that decide the shape of a deploymen
 refuses to start without it rather than warning — it holds Priority credentials and
 every tool reads live ERP data.
 
+### Adding a user
+
+`ADDING-A-USER.md` is the runbook: what to do on the server, what to do on the
+person's machine, and a section per client (Claude Code, Claude Desktop, VS Code
+Copilot, Gemini CLI). It also covers the two identity models -- one shared
+identity from `.env`, or a token per caller from `users.json` -- and which
+server steps each one needs.
+
 ### Connecting a client
 
 ```json
